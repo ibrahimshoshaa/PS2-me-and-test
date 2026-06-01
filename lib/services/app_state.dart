@@ -83,7 +83,10 @@ static const String _defaultHistoryHash =
 
   Timer? _clockTimer;
   SyncService? _sync;
-  Timer? _historyPollTimer; // ✅ polling للسجلات كل 5 ثواني
+  Timer? _historyPollTimer;
+  Timer? _fallbackPollTimer; // ✅ polling احتياطي — بيشتغل بس لما الـ SSE ينقطع
+  bool _sseConnected = false; // ✅ حالة الـ SSE
+  DateTime? _lastSseEvent;   // ✅ آخر مرة وصل فيها SSE event
   bool archiving = false;
   bool isEndingShift = false;
 
@@ -216,20 +219,24 @@ void _checkCountdownAlert(PSDevice d) {
         onRemoteDevices: (rawData, remoteDevices) {
           // ✅ تجاهل الـ SSE اللي جاي من نفس الجهاز
           if (rawData['sender_id'] == _myDeviceId) return;
+          _markSseAlive(); // ✅ SSE شغال
           _mergeRemoteDevices(remoteDevices);
           notifyListeners();
         },
        onRemoteTables: (rawData, remoteTables) {
   if (rawData['sender_id'] == _myDeviceId) return;
+  _markSseAlive(); // ✅
   _mergeRemoteTables(remoteTables);
   notifyListeners();
 },
 onRemoteDrinkTables: (rawData, remoteDrinkTables) {
   if (rawData['sender_id'] == _myDeviceId) return;
+  _markSseAlive(); // ✅
   _mergeRemoteDrinkTables(remoteDrinkTables);
   notifyListeners();
 },
         onRemoteStatic: (data) {
+          _markSseAlive(); // ✅
           _applyStaticData(data);
           notifyListeners();
         },
@@ -274,12 +281,78 @@ onRemoteDrinkTables: (rawData, remoteDrinkTables) {
     );
     _sync!.start();
 
-    // ✅ polling شامل — fallback لكل البيانات
-    // السجلات كل 5 ثواني — الباقي كل 10 ثواني
+    // ✅ Polling ذكي — بيشتغل بس لما الـ SSE ينقطع
+    // الـ SSE هو الأساسي، والـ polling مجرد safety net
     _historyPollTimer?.cancel();
-    _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      _pollAll();
+    _fallbackPollTimer?.cancel();
+
+    // كل 5 ثواني نتحقق: هل الـ SSE شغال؟
+    // لو آخر SSE event أكتر من 30 ثانية → الـ SSE ممكن يكون وقع → poll
+    _historyPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      final now = DateTime.now();
+      final lastEvent = _lastSseEvent;
+      final sseStale = lastEvent == null ||
+          now.difference(lastEvent).inSeconds > 30;
+
+      if (sseStale && !archiving) {
+        _sseConnected = false;
+        _pollAll();
+      }
     });
+
+    // Heartbeat: كل 60 ثانية poll واحد بغض النظر — للـ static data والـ shifts
+    _fallbackPollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (!archiving) _pollStaticFallback();
+    });
+  }
+
+  // ✅ يُستدعى من كل SSE callback عشان نعرف إن الـ SSE شغال
+  void _markSseAlive() {
+    _sseConnected = true;
+    _lastSseEvent = DateTime.now();
+  }
+
+  // ✅ Fallback خفيف — بس للـ static data والـ shifts (مش الكل)
+  // بيتشغل كل 60 ثانية بغض النظر عن الـ SSE
+  Future<void> _pollStaticFallback() async {
+    if (shopId == null) return;
+    try {
+      final results = await Future.wait([
+        FirebaseService.get(FirebaseService.staticDataPath(shopId!)),
+        FirebaseService.get(FirebaseService.openShiftsPath(shopId!)),
+      ]);
+
+      bool changed = false;
+
+      final remoteStatic = results[0];
+      if (remoteStatic != null && remoteStatic is Map) {
+        _applyStaticData(Map<String, dynamic>.from(remoteStatic));
+        changed = true;
+      }
+
+      final remoteOpenShiftsData = results[1];
+      if (remoteOpenShiftsData != null && remoteOpenShiftsData is Map) {
+        final raw = Map<String, dynamic>.from(remoteOpenShiftsData);
+        raw.remove('_sender_id');
+        final typed = raw.map((k, v) =>
+            MapEntry(k, ShiftRecord.fromJson(Map<String, dynamic>.from(v))));
+        typed.forEach((name, shift) {
+          if (!openShifts.containsKey(name)) {
+            openShifts[name] = shift;
+            changed = true;
+          }
+        });
+        openShifts.removeWhere((name, _) {
+          if (!typed.containsKey(name)) {
+            changed = true;
+            return true;
+          }
+          return false;
+        });
+      }
+
+      if (changed) notifyListeners();
+    } catch (_) {}
   }
 
   Future<void> _pollAll() async {
@@ -2858,7 +2931,8 @@ Future<void> clearRechargeTransactions() async {
   @override
   void dispose() {
     _clockTimer?.cancel();
-    _historyPollTimer?.cancel(); // ✅
+    _historyPollTimer?.cancel();
+    _fallbackPollTimer?.cancel(); // ✅
     _sync?.flushAll();
     _sync?.dispose();
     super.dispose();
