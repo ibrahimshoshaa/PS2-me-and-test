@@ -21,9 +21,9 @@ import 'package:http/http.dart' as http;
 
 class FirebaseService {
   static const String _baseUrl =
-      'https://ps-harifa-default-rtdb.firebaseio.com';
+      'https://psmanagementapp-default-rtdb.firebaseio.com';
   static const String _secret =
-      'loFnECpWdlhEHnzGdPW1VoWKbZPepbgrqDVjTnEY';
+      'uy6vaerRBXq497rXIltP2F5NJCn75dyev9DeHeSF';
 
   static String _url(String path) => '$_baseUrl/$path.json?auth=$_secret';
 
