@@ -8,9 +8,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:182668341255:android:781629e5f7cdc4da497aa2",
+        "mobilesdk_app_id": "1:182668341255:android:2409e38630ae290c497aa2",
         "android_client_info": {
-          "package_name": "com.shosha.alharif"
+          "package_name": "com.shosha.alharifa"
         }
       },
       "oauth_client": [],
