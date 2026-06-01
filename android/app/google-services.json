@@ -1,22 +1,22 @@
 {
   "project_info": {
-    "project_number": "863161049716",
-    "firebase_url": "https://ps-harifa-default-rtdb.firebaseio.com",
-    "project_id": "ps-harifa",
-    "storage_bucket": "ps-harifa.firebasestorage.app"
+    "project_number": "182668341255",
+    "firebase_url": "https://psmanagementapp-default-rtdb.firebaseio.com",
+    "project_id": "psmanagementapp",
+    "storage_bucket": "psmanagementapp.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:863161049716:android:4dd80bde7cf973f28f6721",
+        "mobilesdk_app_id": "1:182668341255:android:781629e5f7cdc4da497aa2",
         "android_client_info": {
-          "package_name": "com.shosha.alharifa"
+          "package_name": "com.shosha.alharif"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDs_UdAG10znQGeD9iabH10U_bALTkOfCg"
+          "current_key": "AIzaSyBpUEJK6sLiXC7Xp88jTOyGY1ZefebhonE"
         }
       ],
       "services": {
