@@ -93,12 +93,15 @@ class SyncService {
   void startHistorySSE() {
     if (_disposed) return;
     _historySSE?.cancel();
-    _historySSE = FirebaseService.listenToHistory(
-      shopId,
-      onData: (history) {
-        if (_disposed || _paused) return;
-        callbacks.onRemoteHistory(history);
-      },
+   _historySSE = FirebaseService.listenToHistory(
+  shopId,
+  limit: 1, // 🔥 بس آخر ريكورد جديد
+  onData: (history) {
+    if (_disposed || _paused) return;
+    if (history.isNotEmpty) {
+      callbacks.onRemoteHistory(history);
+    }
+  },
       onError: (_) {},
       retryDelay: const Duration(seconds: 2),
     );
