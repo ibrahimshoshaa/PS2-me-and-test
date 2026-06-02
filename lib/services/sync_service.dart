@@ -1,16 +1,3 @@
-// lib/services/sync_service.dart
-//
-//  بقة المزامنة — مقسّمة حسب نوع البيانات
-// ═══════════════════════════════════════════════════
-//
-// الاستراتيجيات:
-//   1. الأجهزة          → SSE (فوري من Firebase) + push عند كل تغيير
-//   2. التربيزات        → SSE (فوري من Firebase) + push عند كل تغيير ← تغيّر
-//   3. تربيزات مشروبات  → SSE (فوري من Firebase) + push عند كل تغيير ← تغيّر
-//   4. البيانات الثابتة → push عند التعديل فقط
-//   5. السجلات          → push عند الإضافة فقط (append)
-//   6. المديونيات       → push عند التغيير
-
 import 'dart:async'; 
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,13 +5,7 @@ import 'firebase_service.dart';
 
 typedef DataMap = Map<String, dynamic>;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SyncCallbacks — الـ callbacks اللي AppState بيوفّرها
-// ═══════════════════════════════════════════════════════════════════════════════
-
 class SyncCallbacks {
-  /// بيتبعت لما تيجي حالة أجهزة جديدة من Firebase
-  /// rawData يحتوي على sender_id — AppState هو اللي بيتحقق منه
   final void Function(
     Map<String, dynamic> rawData,
     List<Map<String, dynamic>> devices,
@@ -37,29 +18,15 @@ class SyncCallbacks {
   final void Function(Map<String, int> summary) onRemoteDailySummary;
   final void Function(List<Map<String, dynamic>> shifts) onRemoteShiftsHistory;
 
-  /// بناء بيانات الأجهزة للرفع
   final List<Map<String, dynamic>> Function() buildDevicesState;
-
-  /// بناء بيانات التربيزات
   final List<Map<String, dynamic>> Function() buildTables;
   final List<Map<String, dynamic>> Function() buildDrinkTables;
-
-  /// بناء البيانات الثابتة
   final DataMap Function() buildStaticData;
-
-  /// بناء السجلات اليومية
   final List<Map<String, dynamic>> Function() buildHistory;
-
-  /// بناء الشيفتات
   final Map<String, dynamic> Function() buildOpenShifts;
   final List<Map<String, dynamic>> Function() buildShiftsHistory;
-
-  /// بناء المديونيات
   final List<Map<String, dynamic>> Function() buildDebts;
-
-  /// بناء البطولات
   final List<Map<String, dynamic>> Function() buildTournaments;
-
   final void Function(Map<String, dynamic> openShifts) onRemoteOpenShifts;
 
   const SyncCallbacks({
@@ -79,28 +46,17 @@ class SyncCallbacks {
     required this.onRemoteOpenShifts,
     required this.onRemoteDailySummary,
     required this.onRemoteShiftsHistory,
-    required this.onRemoteHistory, // ← أضف السطر ده
-
+    required this.onRemoteHistory,
   });
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SyncService
-// ═══════════════════════════════════════════════════════════════════════════════
 
 class SyncService {
   final String shopId;
   final SyncCallbacks callbacks;
-
-  /// معرّف الجهاز المحلي — بيتضمّن في كل push للأجهزة
   final String senderId;
 
   StreamSubscription? _openShiftsSSE;
-
-  // ── Timers ────────────────────────────────────────────────────────────────
   Timer? _debounceTimer;
-
-  // ── SSE subscriptions ─────────────────────────────────────────────────────
   StreamSubscription? _devicesSSE;
   StreamSubscription? _tablesSSE;
   StreamSubscription? _drinkTablesSSE;
@@ -109,13 +65,9 @@ class SyncService {
   StreamSubscription? _dailySummarySSE;
   StreamSubscription? _shiftsHistorySSE;
 
-
-
-  // ── حالة ──────────────────────────────────────────────────────────────────
   bool _paused = false;
   bool _disposed = false;
 
-  // ── pending flags ──────────────────────────────────────────────────────────
   bool _pendingDevices = false;
   bool _pendingTables = false;
   bool _pendingStatic = false;
@@ -130,10 +82,6 @@ class SyncService {
     required this.senderId,
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Start / Stop
-  // ═══════════════════════════════════════════════════════════════════════════
-
   void start() {
     _startDevicesSSE();
     _startTablesSSE();
@@ -145,32 +93,32 @@ class SyncService {
     _startShiftsHistorySSE();
   }
 
- void _startOpenShiftsSSE() {
-  _openShiftsSSE?.cancel();
-  _openShiftsSSE = FirebaseService.listenToOpenShifts(
-    shopId,
-    senderId: senderId, // ← أضف
-    onData: (openShifts) {
-      if (_disposed || _paused) return;
-      callbacks.onRemoteOpenShifts(openShifts);
-    },
-    onError: (_) {},
-    retryDelay: const Duration(seconds: 2),
-  );
-}
+  void _startOpenShiftsSSE() {
+    _openShiftsSSE?.cancel();
+    _openShiftsSSE = FirebaseService.listenToOpenShifts(
+      shopId,
+      senderId: senderId,
+      onData: (openShifts) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteOpenShifts(openShifts);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
 
   void _startShiftsHistorySSE() {
-  _shiftsHistorySSE?.cancel();
-  _shiftsHistorySSE = FirebaseService.listenToShiftsHistory(
-    shopId,
-    onData: (shifts) {
-      if (_disposed || _paused) return;
-      callbacks.onRemoteShiftsHistory(shifts);
-    },
-    onError: (_) {},
-    retryDelay: const Duration(seconds: 2),
-  );
-}
+    _shiftsHistorySSE?.cancel();
+    _shiftsHistorySSE = FirebaseService.listenToShiftsHistory(
+      shopId,
+      onData: (shifts) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteShiftsHistory(shifts);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
 
   void pause() => _paused = true;
 
@@ -192,10 +140,6 @@ class SyncService {
     _shiftsHistorySSE?.cancel();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SSE للأجهزة — فوري
-  // ═══════════════════════════════════════════════════════════════════════════
-
   void _startDevicesSSE() {
     _devicesSSE?.cancel();
     _devicesSSE = FirebaseService.listenToDevices(
@@ -209,39 +153,31 @@ class SyncService {
     );
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SSE للتربيزات — فوري (بدل polling كل 3 ثواني) ← جديد
-  // ═══════════════════════════════════════════════════════════════════════════
-
   void _startTablesSSE() {
-  _tablesSSE?.cancel();
-  _tablesSSE = FirebaseService.listenToTables(
-    shopId,
-    onData: (rawData, tables) {
-      if (_disposed || _paused) return;
-      callbacks.onRemoteTables(rawData, tables);
-    },
-    onError: (_) {},
-    retryDelay: const Duration(seconds: 2),
-  );
-}
+    _tablesSSE?.cancel();
+    _tablesSSE = FirebaseService.listenToTables(
+      shopId,
+      onData: (rawData, tables) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteTables(rawData, tables);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SSE لتربيزات المشروبات — فوري (بدل polling كل 3 ثواني) ← جديد
-  // ═══════════════════════════════════════════════════════════════════════════
-
- void _startDrinkTablesSSE() {
-  _drinkTablesSSE?.cancel();
-  _drinkTablesSSE = FirebaseService.listenToDrinkTables(
-    shopId,
-    onData: (rawData, drinkTables) {
-      if (_disposed || _paused) return;
-      callbacks.onRemoteDrinkTables(rawData, drinkTables);
-    },
-    onError: (_) {},
-    retryDelay: const Duration(seconds: 2),
-  );
-}
+  void _startDrinkTablesSSE() {
+    _drinkTablesSSE?.cancel();
+    _drinkTablesSSE = FirebaseService.listenToDrinkTables(
+      shopId,
+      onData: (rawData, drinkTables) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteDrinkTables(rawData, drinkTables);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
 
   void _startStaticSSE() {
     _staticSSE?.cancel();
@@ -257,35 +193,31 @@ class SyncService {
   }
 
   void _startHistorySSE() {
-  _historySSE?.cancel();
-  _historySSE = FirebaseService.listenToHistory(
-    shopId,
-    onData: (history) {
-      if (_disposed || _paused) return;
-      callbacks.onRemoteHistory(history);
-    },
-    onError: (_) {},
-    retryDelay: const Duration(seconds: 2),
-  );
-}
+    _historySSE?.cancel();
+    _historySSE = FirebaseService.listenToHistory(
+      shopId,
+      onData: (history) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteHistory(history);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
+
   void _startDailySummarySSE() {
-  _dailySummarySSE?.cancel();
-  _dailySummarySSE = FirebaseService.listenToDailySummary(
-    shopId,
-    onData: (summary) {
-      if (_disposed || _paused) return;
-      callbacks.onRemoteDailySummary(summary);
-    },
-    onError: (_) {},
-    retryDelay: const Duration(seconds: 2),
-  );
-}
+    _dailySummarySSE?.cancel();
+    _dailySummarySSE = FirebaseService.listenToDailySummary(
+      shopId,
+      onData: (summary) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteDailySummary(summary);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Push Methods — بيتبعتوا من AppState عند التغيير
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /// حالة الأجهزة — فورية (بدون debounce) مع senderId
   Future<void> pushDevices() async {
     if (_paused || _disposed) {
       _pendingDevices = true;
@@ -300,19 +232,25 @@ class SyncService {
     }
   }
 
-  /// التربيزات — فورية عبر SSE (مع debounce 500ms للـ push) ← تغيّر
+  Future<void> pushSingleDevice(int deviceIndex, Map<String, dynamic> deviceData) async {
+    if (_paused || _disposed) return;
+    try {
+      await FirebaseService.pushSingleDeviceState(shopId, deviceIndex, deviceData, senderId);
+    } catch (_) {
+      _pendingDevices = true; 
+    }
+  }
+
   void schedulePushTables() {
     _pendingTables = true;
     _scheduleDebounce();
   }
 
-  /// البيانات الثابتة — مع debounce
   void schedulePushStatic() {
     _pendingStatic = true;
     _scheduleDebounce();
   }
 
-  /// السجلات — فورية
   Future<void> pushHistory() async {
     if (_paused || _disposed) {
       _pendingHistory = true;
@@ -327,25 +265,30 @@ class SyncService {
     }
   }
 
-  /// الشيفتات
+  Future<void> pushSingleHistory(Map<String, dynamic> record) async {
+    if (_paused || _disposed) return;
+    try {
+      await FirebaseService.appendSingleHistoryRecord(shopId, record);
+    } catch (_) {
+      _pendingHistory = true;
+    }
+  }
+
   void schedulePushShifts() {
     _pendingShifts = true;
     _scheduleDebounce();
   }
 
-  /// المديونيات
   void schedulePushDebts() {
     _pendingDebts = true;
     _scheduleDebounce();
   }
 
-  /// البطولات
   void schedulePushTournaments() {
     _pendingTournaments = true;
     _scheduleDebounce();
   }
 
-  /// Flush كل البيانات المعلقة (بعد resume أو قبل dispose)
   Future<void> _flushPending() async {
     if (_disposed) return;
 
@@ -360,8 +303,6 @@ class SyncService {
 
   Future<void> flushAll() => _flushPending();
 
-  // ─── Debounce ──────────────────────────────────────────────────────────────
-
   void _scheduleDebounce() {
     _debounceTimer?.cancel();
     _debounceTimer = Timer(
@@ -370,20 +311,18 @@ class SyncService {
     );
   }
 
-  // ─── Internal Push ────────────────────────────────────────────────────────
-
- Future<void> _pushTables() async {
-  if (_paused || _disposed) return;
-  _pendingTables = false;
-  try {
-    await Future.wait([
-      FirebaseService.pushTablesState(shopId, callbacks.buildTables(), senderId),
-      FirebaseService.pushDrinkTablesState(shopId, callbacks.buildDrinkTables(), senderId),
-    ]);
-  } catch (_) {
-    _pendingTables = true;
+  Future<void> _pushTables() async {
+    if (_paused || _disposed) return;
+    _pendingTables = false;
+    try {
+      await Future.wait([
+        FirebaseService.pushTablesState(shopId, callbacks.buildTables(), senderId),
+        FirebaseService.pushDrinkTablesState(shopId, callbacks.buildDrinkTables(), senderId),
+      ]);
+    } catch (_) {
+      _pendingTables = true;
+    }
   }
-}
 
   Future<void> _pushStatic() async {
     if (_paused || _disposed) return;
@@ -396,20 +335,20 @@ class SyncService {
     }
   }
 
- Future<void> _pushShifts() async {
-  if (_paused || _disposed) return;
-  _pendingShifts = false;
-  try {
-    await Future.wait([
-      FirebaseService.pushOpenShifts(
-          shopId, callbacks.buildOpenShifts(), senderId), // ← أضف senderId
-      FirebaseService.pushShiftsHistory(
-          shopId, callbacks.buildShiftsHistory()),
-    ]);
-  } catch (_) {
-    _pendingShifts = true;
+  Future<void> _pushShifts() async {
+    if (_paused || _disposed) return;
+    _pendingShifts = false;
+    try {
+      await Future.wait([
+        FirebaseService.pushOpenShifts(
+            shopId, callbacks.buildOpenShifts(), senderId), 
+        FirebaseService.pushShiftsHistory(
+            shopId, callbacks.buildShiftsHistory()),
+      ]);
+    } catch (_) {
+      _pendingShifts = true;
+    }
   }
-}
 
   Future<void> _pushDebts() async {
     if (_paused || _disposed) return;
@@ -431,10 +370,6 @@ class SyncService {
       _pendingTournaments = true;
     }
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Local Cache
-  // ═══════════════════════════════════════════════════════════════════════════
 
   static Future<void> saveLocal(
       String shopId, Map<String, dynamic> data) async {
