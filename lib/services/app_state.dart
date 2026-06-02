@@ -360,7 +360,7 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
     try {
       // نجيب كل البيانات بالتوازي
       final results = await Future.wait([
-        FirebaseService.get(FirebaseService.historyPath(shopId!)),
+        FirebaseService.getRecentHistory(shopId!),   // بدل get(historyPath) — أسرع
         FirebaseService.get(FirebaseService.staticDataPath(shopId!)),
         FirebaseService.get(FirebaseService.debtsPath(shopId!)),
         FirebaseService.get(FirebaseService.shopTournamentsPath(shopId!)),
@@ -373,8 +373,12 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
 
       // ── السجلات ───────────────────────────────────────────────────────
       final remoteHistory = results[0];
-      if (remoteHistory != null) {
-        final typed = _historyFromFirebase(remoteHistory);
+      // getRecentHistory بترجع List مباشرة — مش محتاجين _historyFromFirebase
+      if (remoteHistory is List && (remoteHistory as List).isNotEmpty) {
+        final typed = (remoteHistory as List)
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
         if (typed.length > history.length) {
           history = typed;
           changed = true;
