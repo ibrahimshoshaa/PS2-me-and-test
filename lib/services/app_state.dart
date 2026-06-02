@@ -79,7 +79,6 @@ class AppState extends ChangeNotifier {
 
   // 🔥 FLAGS: هل البيانات الثقيلة اتحملت on-demand؟
   bool _historyLoaded = false;
-  bool _historyFetchedToday = false; // 🔥 عشان منجيبش أكتر من مرة في اليوم
   bool _shiftsHistoryLoaded = false;
   bool _tournamentsLoaded = false;
   bool _debtsLoaded = false;
@@ -1854,7 +1853,6 @@ class AppState extends ChangeNotifier {
 
       history.clear();
       _historyLoaded = false; // reset — لازم يتحمل on-demand بعد الأرشفة
-      _historyFetchedToday = false; // 🔥 يوم جديد = يجيب من أول
       await FirebaseService.set(FirebaseService.historyPath(shopId!), []);
       await _saveHistory();
       notifyListeners();
@@ -2545,10 +2543,6 @@ class AppState extends ChangeNotifier {
             action: AuditAction.login,
             actionDetails: 'دخل الأدمن للنظام');
         _sync?.startHistorySSE();
-        if (!_historyFetchedToday) {
-          fetchHistoryOnDemand(limit: 300);
-          _historyFetchedToday = true;
-        }
         notifyListeners();
         return 'admin';
       }
@@ -3154,10 +3148,6 @@ class AppState extends ChangeNotifier {
       AuditLogService.configure(
           shopId: shopId, cashierName: 'أدمن', isAdmin: true);
       _sync?.startHistorySSE();
-      if (!_historyFetchedToday) {
-        fetchHistoryOnDemand(limit: 300);
-        _historyFetchedToday = true;
-      }
     } else if (role == 'cashier') {
       final name = prefs.getString('login_cashier_name');
       if (name != null) {
