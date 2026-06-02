@@ -1093,12 +1093,29 @@ class _AllSessionsTab extends StatelessWidget {
 // شاشة تقارير الشيفتات للأدمن
 // ══════════════════════════════════════════════════════════════════════════════
 
-class ShiftHistoryScreen extends StatelessWidget {
+// بعد
+class ShiftHistoryScreen extends StatefulWidget {
   const ShiftHistoryScreen({super.key});
+  @override
+  State<ShiftHistoryScreen> createState() => _ShiftHistoryScreenState();
+}
+
+class _ShiftHistoryScreenState extends State<ShiftHistoryScreen> {
+  @override
+  void initState() {
+    super.initState();
+    context.read<AppState>().fetchShiftsHistoryOnDemand();
+  }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    if (state.isLoadingShifts && state.shiftsHistory.isEmpty) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0b0e14),
+        body: Center(child: CircularProgressIndicator(color: Color(0xFF38bdf8))),
+      );
+    }
     final shifts = state.shiftsHistory.reversed.toList();
 
     return Scaffold(
