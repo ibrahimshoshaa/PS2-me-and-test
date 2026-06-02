@@ -248,8 +248,8 @@ onRemoteDrinkTables: (rawData, remoteDrinkTables) {
   notifyListeners();
 },
        onRemoteHistory: (remoteHistory) {
-  if (remoteHistory.length != history.length) {
-    history = remoteHistory;
+  if (remoteHistory.length > history.length) {
+    history.addAll(remoteHistory.skip(history.length));
     notifyListeners();
   }
 },
@@ -373,9 +373,8 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
 
       // ── السجلات ───────────────────────────────────────────────────────
       final remoteHistory = results[0];
-      if (remoteHistory != null && remoteHistory is List) {
-        final typed = List<Map<String, dynamic>>.from(
-            remoteHistory.map((h) => Map<String, dynamic>.from(h)));
+      if (remoteHistory != null) {
+        final typed = _historyFromFirebase(remoteHistory);
         if (typed.length > history.length) {
           history = typed;
           changed = true;
@@ -470,6 +469,29 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
     if (remoteHistory.length > history.length) {
       history = remoteHistory;
     }
+  }
+
+  /// تحويل history من Firebase — بيتعامل مع List (cache) وMap (Firebase POST)
+  static List<Map<String, dynamic>> _historyFromFirebase(dynamic raw) {
+    if (raw == null) return [];
+    if (raw is List) {
+      return raw.whereType<Map>()
+          .map((h) => Map<String, dynamic>.from(h))
+          .toList();
+    }
+    if (raw is Map) {
+      final list = raw.values.whereType<Map>()
+          .map((h) => Map<String, dynamic>.from(h))
+          .toList();
+      list.sort((a, b) {
+        final da = DateTime.tryParse(a['date']?.toString() ?? '');
+        final db = DateTime.tryParse(b['date']?.toString() ?? '');
+        if (da == null || db == null) return 0;
+        return da.compareTo(db);
+      });
+      return list;
+    }
+    return [];
   }
 
   void _mergeRemoteDevices(List<Map<String, dynamic>> remoteDevices) {
@@ -855,9 +877,8 @@ Future<void> _restoreOpenShiftFromFirebase() async {
   historyPasswordEnabled = data['history_password_enabled'];
 }
     if (data['history'] != null) {
-      history = List<Map<String, dynamic>>.from(
-          (data['history'] as List)
-              .map((h) => Map<String, dynamic>.from(h)));
+      // history ممكن تيجي List (من cache محلي) أو Map (من Firebase بعد POST)
+      history = _historyFromFirebase(data['history']);
     }
    final histHash = data['history_password_hash'] ?? 
     data['static']?['history_password_hash'];
@@ -1263,7 +1284,10 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
   Future<void> _saveHistory() async {
     if (shopId == null) return;
     await SyncService.saveLocal(shopId!, _buildDataDict());
-    await FirebaseService.pushHistory(shopId!, history);
+    // POST ريكورد واحد بس — مش upload كل السجل
+    if (history.isNotEmpty) {
+      await _sync?.pushSingleHistory(history.last);
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2430,6 +2454,7 @@ void restoreDefaultCategories() {
         _saveLoginState('admin', null); // ✅
         AuditLogService.configure(shopId: shopId, cashierName: 'أدمن', isAdmin: true);
         AuditLogService.log(action: AuditAction.login, actionDetails: 'دخل الأدمن للنظام');
+        _sync?.startHistorySSE(); // الأدمن بس هو اللي محتاج السجل لحظياً
         notifyListeners();
         return 'admin';
       }
@@ -2457,6 +2482,7 @@ void restoreDefaultCategories() {
 
  void logout() {
     AuditLogService.log(action: AuditAction.logout, actionDetails: 'خرج من النظام');
+    _sync?.stopHistorySSE(); // الأدمن خرج — مش محتاجين SSE على السجل
     isAdmin = false;
     isCashier = false;
     currentCashierName = null;
@@ -2811,6 +2837,7 @@ Future<void> _pushShiftsToFirebase() async {
       isCashier = false;
       currentCashierName = null;
       AuditLogService.configure(shopId: shopId, cashierName: 'أدمن', isAdmin: true);
+      _sync?.startHistorySSE(); // استعادة SSE للأدمن بعد إعادة فتح التطبيق
     } else if (role == 'cashier') {
       final name = prefs.getString('login_cashier_name');
       if (name != null) {
