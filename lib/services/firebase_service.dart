@@ -280,35 +280,22 @@ class FirebaseService {
     return set(shopTournamentsPath(shopId), tournaments);
   }
 
-  // ─── أرشيف مقسّم (إجماليات + تفاصيل منفصلة) ───────────────────────────
+  // ─── أرشيف (إجماليات فقط) ──────────────────────────────────────────────
 
-  /// يكتب الإجماليات في `archives` والجلسات الكاملة في `archive_details`.
-  static Future<String?> pushArchiveWithDetails({
+  /// يكتب الإجماليات فقط في `archives` — بدون حفظ تفاصيل الجلسات.
+  static Future<String?> pushArchive({
     required String shopId,
     required String date,
     required double totalTime,
     required double totalBuffet,
     required double totalOverall,
-    required List<Map<String, dynamic>> records,
   }) async {
-    final archiveId = await push(shopArchivePath(shopId), {
+    return push(shopArchivePath(shopId), {
       'date': date,
       'total_time': totalTime,
       'total_buffet': totalBuffet,
       'total_overall': totalOverall,
-      'records_count': records.length,
     });
-    if (archiveId == null) return null;
-
-    final ok = await set(shopArchiveDetailPath(shopId, archiveId), {
-      'date': date,
-      'records': records,
-    });
-    if (!ok) {
-      await delete('${shopArchivePath(shopId)}/$archiveId');
-      return null;
-    }
-    return archiveId;
   }
 
   /// يجيب التفاصيل الكاملة لأرشيف يوم معيّن (استخدمه عند الطلب فقط).
