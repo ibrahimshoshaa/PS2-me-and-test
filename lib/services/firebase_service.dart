@@ -31,6 +31,14 @@ class FirebaseService {
 
   static String _url(String path) => '$_baseUrl/$path.json?auth=$_secret';
 
+  /// مثل `_url` لكن بيقبل query params إضافية (مثلاً limitToLast)
+  static String _urlWithQuery(String path, Map<String, String> params) {
+    final base = '$_baseUrl/$path.json?auth=$_secret';
+    if (params.isEmpty) return base;
+    final extra = params.entries.map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}').join('&');
+    return '$base&$extra';
+  }
+
   // ─── CRUD الأساسي ──────────────────────────────────────────────────────────
 
   static Future<dynamic> get(String path) async {
@@ -268,6 +276,49 @@ class FirebaseService {
   // Pull منفصل لكل نوع بيانات
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /// بيجيب آخر [limit] سجل من history باستخدام limitToLast
+  /// — أسرع بكتير من تحميل كل السجلات لما تكون كتير
+  static Future<List<Map<String, dynamic>>> getRecentHistory(
+    String shopId, {
+    int limit = 100,
+  }) async {
+    try {
+      final url = _urlWithQuery(historyPath(shopId), {
+        'limitToLast': limit.toString(),
+        'orderBy': r'"$key"',
+      });
+      final r = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return [];
+      final body = jsonDecode(r.body);
+      if (body == null) return [];
+      if (body is List) {
+        return body
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
+      }
+      if (body is Map) {
+        final list = body.values
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
+        list.sort((a, b) {
+          final da = DateTime.tryParse(a['date']?.toString() ?? '');
+          final db = DateTime.tryParse(b['date']?.toString() ?? '');
+          if (da == null || db == null) return 0;
+          return da.compareTo(db);
+        });
+        return list;
+      }
+      return [];
+    } catch (e) {
+      print('Firebase getRecentHistory error: $e');
+      return [];
+    }
+  }
+
   static Future<Map<String, dynamic>?> pullAllData(String shopId) async {
     try {
       final oldData = await get(shopDataPath(shopId));
@@ -277,7 +328,7 @@ class FirebaseService {
         get(tablesStatePath(shopId)),
         get(drinkTablesStatePath(shopId)),
         get(staticDataPath(shopId)),
-        get(historyPath(shopId)),
+        getRecentHistory(shopId),          // بدل get(historyPath) — أسرع
         get(dailySummaryPath(shopId)),
         get(shiftsHistoryPath(shopId)),
         get(openShiftsPath(shopId)),
@@ -350,10 +401,9 @@ class FirebaseService {
       }
 
       if (historyData != null) {
+        // getRecentHistory بترجع List مباشرة
         if (historyData is List) {
           combined['history'] = historyData;
-        } else if (historyData is Map) {
-          combined['history'] = historyData.values.toList();
         } else {
           combined['history'] = [];
         }
@@ -516,12 +566,17 @@ class FirebaseService {
 
   static StreamSubscription<dynamic> listenToHistory(
     String shopId, {
+    int limit = 200,
     required void Function(List<Map<String, dynamic>> history) onData,
     void Function(Object error)? onError,
     Duration retryDelay = const Duration(seconds: 2),
   }) {
-    return listen(
-      historyPath(shopId),
+    final fullUrl = _urlWithQuery(historyPath(shopId), {
+      'limitToLast': limit.toString(),
+      'orderBy': r'"$key"',
+    });
+    return _listenRaw(
+      fullUrl,
       onData: (payload) {
         if (payload == null || payload is! Map) return;
         final data = payload['data'];
@@ -704,6 +759,66 @@ class FirebaseService {
       onError: onError,
     );
 
+    return _CancellableSubscription(subscription, onCancel: () {
+      cancelled = true;
+    });
+  }
+
+  /// مثل [listen] بالظبط لكن بياخد URL كامل بدل path —
+  /// بيُستخدم لما محتاجين نضيف query params زي limitToLast
+  static StreamSubscription<dynamic> _listenRaw(
+    String fullUrl, {
+    required void Function(dynamic data) onData,
+    void Function(Object error)? onError,
+    void Function()? onDone,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    final controller = StreamController<dynamic>.broadcast();
+    bool cancelled = false;
+
+    Future<void> connect() async {
+      while (!cancelled) {
+        http.Client? client;
+        try {
+          client = http.Client();
+          final request = http.Request('GET', Uri.parse(fullUrl));
+          request.headers['Accept'] = 'text/event-stream';
+          request.headers['Cache-Control'] = 'no-cache';
+
+          final response = await client.send(request);
+
+          if (response.statusCode != 200) {
+            client.close();
+            await Future.delayed(retryDelay);
+            continue;
+          }
+
+          StringBuffer buffer = StringBuffer();
+
+          await for (final chunk in response.stream.transform(utf8.decoder)) {
+            if (cancelled) break;
+            buffer.write(chunk);
+            final raw = buffer.toString();
+            final blocks = raw.split('\n\n');
+            for (int i = 0; i < blocks.length - 1; i++) {
+              _processSSEBlock(blocks[i], controller);
+            }
+            buffer = StringBuffer(blocks.last);
+          }
+        } catch (e) {
+          if (!cancelled) onError?.call(e);
+        } finally {
+          client?.close();
+        }
+        if (!cancelled) await Future.delayed(retryDelay);
+      }
+      if (!controller.isClosed) controller.close();
+      onDone?.call();
+    }
+
+    connect();
+
+    final subscription = controller.stream.listen(onData, onError: onError);
     return _CancellableSubscription(subscription, onCancel: () {
       cancelled = true;
     });
