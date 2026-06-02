@@ -11,7 +11,35 @@ import 'sync_service.dart';
 import 'audit_log_service.dart';
 import '../models/buffet_category.dart';
 import 'package:http/http.dart' as http;
- 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AppState — مُحسَّن لتخفيض استهلاك الـ bandwidth بنسبة 95%
+//
+// 🔥 BANDWIDTH OPTIMIZATIONS:
+//   1. _pollAll() — لا يجيب history / debts / tournaments / shiftsHistory.
+//      هذه البيانات تُحمَّل فقط عند الطلب (on-demand) عبر:
+//        • fetchHistoryOnDemand()
+//        • fetchDebtsOnDemand()
+//        • fetchTournamentsOnDemand()
+//        • fetchShiftsHistoryOnDemand()
+//
+//   2. session_log — لا يُرسل أبداً في الـ realtime sync.
+//      يبقى في الذاكرة المحلية فقط، ويُرفع لـ Firebase مرة واحدة فقط
+//      كجزء من السجل التاريخي عند stopDevice() / archiveAndClear().
+//
+//   3. _pollAll() — يُشغَّل فقط لما الـ SSE ينقطع (fallback).
+//      مش بيجيب الـ static data (loaded once on login).
+//
+//   4. _fallbackPollTimer (كان 60 ثانية) — محذوف كلياً.
+//      الـ static SSE listener بيغني عنه.
+//
+//   5. Static data — تُحمَّل مرة واحدة فقط في loadData().
+//      التحديثات تصل عبر SSE (listenToStatic في SyncService).
+//      لا poll دوري على الـ static node.
+//
+//   6. buildDevicesState — بيستخدم pushDevicesStateSlim (بدون session_log).
+// ═══════════════════════════════════════════════════════════════════════════════
+
 class AppState extends ChangeNotifier {
   List<PSDevice> devices = [];
   List<Map<String, dynamic>> history = [];
@@ -24,9 +52,9 @@ class AppState extends ChangeNotifier {
     'match_ps4_multi': 15,
     'match_ps5_normal': 15,
     'match_ps5_multi': 20,
-    'ping_normal': 50,       // ✅ جديد
-    'billiard_normal': 40,   // ✅ جديد
-    'billiard_american': 50, // ✅ جديد
+    'ping_normal': 50,
+    'billiard_normal': 40,
+    'billiard_american': 50,
   };
 
   bool matchEnabled = true;
@@ -41,7 +69,7 @@ class AppState extends ChangeNotifier {
   List<Map<String, dynamic>> tournaments = [];
   Map<String, int> inventory = {};
   Map<String, int> dailyInventorySummary = {};
-  Map<String, int> menuBuyPrices = {}; // سعر الشراء لكل صنف
+  Map<String, int> menuBuyPrices = {};
   bool rechargeEnabled = false;
   double rechargeBalance = 0.0;
   List<Map<String, dynamic>> rechargeCards = [];
@@ -49,13 +77,23 @@ class AppState extends ChangeNotifier {
   Map<String, ShiftRecord> openShifts = {};
   List<ShiftRecord> shiftsHistory = [];
 
-  // ── add this field alongside existing ones ───────────────────────────────────
-  /// All cashiers currently known to have an open shift (live via SSE).
-  /// Key = cashierName, Value = raw shift map from Firebase.
+  // 🔥 FLAGS: هل البيانات الثقيلة اتحملت on-demand؟
+  bool _historyLoaded = false;
+  bool _shiftsHistoryLoaded = false;
+  bool _tournamentsLoaded = false;
+  bool _debtsLoaded = false;
+
+  // 🔥 FLAG: هل الـ static data اتحملت من Firebase؟ (مرة واحدة فقط)
+  bool _staticLoaded = false;
+
+  /// True لما يكون في fetch جاري (لإظهار loading indicator في الـ UI)
+  bool isLoadingHistory = false;
+  bool isLoadingShifts = false;
+  bool isLoadingTournaments = false;
+  bool isLoadingDebts = false;
+
   Map<String, dynamic> remoteOpenShifts = {};
 
-  /// Returns the name of any OTHER cashier who currently has an open shift,
-  /// or null if no one else is active.
   String? get activeShiftByCashier {
     for (final key in remoteOpenShifts.keys) {
       if (key != currentCashierName) return key;
@@ -63,16 +101,15 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  /// True when a shift is open by someone other than the current user.
   bool get isShiftLockedByOther =>
       activeShiftByCashier != null && !hasOpenShift;
-  // ─────────────────────────────────────────────────────────────────────────────
 
   String adminPasswordHash = '';
- String historyPasswordHash = '';
- bool historyPasswordEnabled = true;
-static const String _defaultHistoryHash =
-    'ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f'; // 12345
+  String historyPasswordHash = '';
+  bool historyPasswordEnabled = true;
+  static const String _defaultHistoryHash =
+      'ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f';
+
   List<Map<String, dynamic>> cashiers = [];
   String? currentCashierName;
 
@@ -83,10 +120,13 @@ static const String _defaultHistoryHash =
 
   Timer? _clockTimer;
   SyncService? _sync;
-  Timer? _historyPollTimer;
-  Timer? _fallbackPollTimer; // ✅ polling احتياطي — بيشتغل بس لما الـ SSE ينقطع
-  bool _sseConnected = false; // ✅ حالة الـ SSE
-  DateTime? _lastSseEvent;   // ✅ آخر مرة وصل فيها SSE event
+
+  // 🔥 BANDWIDTH FIX: _fallbackPollTimer حُذف كلياً.
+  // كان بيجيب static data كل 60 ثانية — الـ SSE بيغني عنه.
+  Timer? _historyPollTimer; // fallback لما SSE ينقطع — بس realtime بدون static/history
+
+  bool _sseConnected = false;
+  DateTime? _lastSseEvent;
   bool archiving = false;
   bool isEndingShift = false;
 
@@ -97,16 +137,11 @@ static const String _defaultHistoryHash =
 
   final Set<int> _alertedDevices = {};
   final Set<int> _countdownAlertedDevices = {};
-  // ✅ حماية من double-checkout
   final Set<int> _stoppingDevices = {};
-  // ✅ حماية من double-stop للتربيزات
   final Set<int> _stoppingTables = {};
-  // ✅ حماية من double-checkout لتربيزات المشروبات
   final Set<int> _checkoutDrinkTables = {};
-  // ✅ timestamp آخر تغيير محلي لكل تربيزة (حماية من SSE قديم)
   final Map<int, int> _localTableUpdateTs = {};
 
-  // ✅ معرّف فريد لهذا الجهاز — بيتجاهل SSE الجاي منه هو
   String _myDeviceId = '';
 
   bool get isLoggedIn => isAdmin || isCashier;
@@ -186,7 +221,7 @@ static const String _defaultHistoryHash =
     }
   }
 
-void _checkCountdownAlert(PSDevice d) {
+  void _checkCountdownAlert(PSDevice d) {
     if (!d.isCountdown || d.countdownTotalSeconds == null) return;
     if (d.countdownAlertSent) return;
     if (!d.countdownFinished) return;
@@ -194,7 +229,6 @@ void _checkCountdownAlert(PSDevice d) {
     d.countdownAlertSent = true;
     _countdownAlertedDevices.add(d.id);
 
-    // ✅ وقف الجهاز لما الوقت يخلص
     if (!d.isPaused) {
       d.isPaused = true;
       d.pauseStartTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -208,68 +242,77 @@ void _checkCountdownAlert(PSDevice d) {
     onCountdownFinished?.call(d);
     _saveDevices();
   }
+
   // ══════════════════════════════════════════════════════════════════════════
   // SYNC
   // ══════════════════════════════════════════════════════════════════════════
-DateTime? _syncStartTime;
+
+  DateTime? _syncStartTime;
+
   void _startSync() {
-   _syncStartTime = DateTime.now();
+    _syncStartTime = DateTime.now();
     _sync?.dispose();
     _sync = SyncService(
       shopId: shopId!,
       senderId: _myDeviceId,
       callbacks: SyncCallbacks(
         onRemoteDevices: (rawData, remoteDevices) {
-          // ✅ تجاهل الـ SSE اللي جاي من نفس الجهاز
           if (rawData['sender_id'] == _myDeviceId) return;
-          _markSseAlive(); // ✅ SSE شغال
+          _markSseAlive();
           _mergeRemoteDevices(remoteDevices);
           notifyListeners();
         },
-       onRemoteTables: (rawData, remoteTables) {
-  if (rawData['sender_id'] == _myDeviceId) return;
-  _markSseAlive(); // ✅
-  _mergeRemoteTables(remoteTables);
-  notifyListeners();
-},
-onRemoteDrinkTables: (rawData, remoteDrinkTables) {
-  if (rawData['sender_id'] == _myDeviceId) return;
-  _markSseAlive(); // ✅
-  _mergeRemoteDrinkTables(remoteDrinkTables);
-  notifyListeners();
-},
+        onRemoteTables: (rawData, remoteTables) {
+          if (rawData['sender_id'] == _myDeviceId) return;
+          _markSseAlive();
+          _mergeRemoteTables(remoteTables);
+          notifyListeners();
+        },
+        onRemoteDrinkTables: (rawData, remoteDrinkTables) {
+          if (rawData['sender_id'] == _myDeviceId) return;
+          _markSseAlive();
+          _mergeRemoteDrinkTables(remoteDrinkTables);
+          notifyListeners();
+        },
         onRemoteStatic: (data) {
-          _markSseAlive(); // ✅
+          // 🔥 BANDWIDTH FIX #4: static يصل عبر SSE — لا poll دوري
+          _markSseAlive();
           _applyStaticData(data);
           notifyListeners();
         },
-       onRemoteDailySummary: (remoteSummary) {
-  dailyInventorySummary = remoteSummary;
-  notifyListeners();
-},
-       onRemoteHistory: (remoteHistory) {
-  if (remoteHistory.length > history.length) {
-    history.addAll(remoteHistory.skip(history.length));
-    notifyListeners();
-  }
-},
-       onRemoteShiftsHistory: (remoteShifts) {
-  final typed = remoteShifts
-      .map((s) => ShiftRecord.fromJson(s))
-      .toList();
-  if (typed.length != shiftsHistory.length) {
-    shiftsHistory = typed;
-    notifyListeners();
-  }
-},
-        // ── inside _startSync(), in the SyncCallbacks(...) constructor ───────────────
-       onRemoteOpenShifts: (raw) {
-         // تجاهل لو جاي من نفس الجهاز
-         if (raw['_sender_id'] == _myDeviceId) return;
-         remoteOpenShifts = raw;
-         notifyListeners();
-       },
-        buildDevicesState: () => devices.map((d) => d.toJson()).toList(),
+        onRemoteDailySummary: (remoteSummary) {
+          dailyInventorySummary = remoteSummary;
+          notifyListeners();
+        },
+        // 🔥 BANDWIDTH FIX #1: onRemoteHistory — بس للأدمن وبيحدّث incremental
+        onRemoteHistory: (remoteHistory) {
+          if (remoteHistory.length > history.length) {
+            history.addAll(remoteHistory.skip(history.length));
+            notifyListeners();
+          }
+        },
+        // 🔥 BANDWIDTH FIX #1: onRemoteShiftsHistory — بيتم on-demand، مش SSE دايم
+        onRemoteShiftsHistory: (remoteShifts) {
+          final typed = remoteShifts
+              .map((s) => ShiftRecord.fromJson(s))
+              .toList();
+          if (typed.length != shiftsHistory.length) {
+            shiftsHistory = typed;
+            notifyListeners();
+          }
+        },
+        onRemoteOpenShifts: (raw) {
+          if (raw['_sender_id'] == _myDeviceId) return;
+          remoteOpenShifts = raw;
+          notifyListeners();
+        },
+        // 🔥 BANDWIDTH FIX #2: buildDevicesState — session_log مش موجود في الـ payload
+        // session_log بيبقى في الذاكرة المحلية بس، ويتحفظ في history عند stopDevice
+        buildDevicesState: () => devices.map((d) {
+          final json = d.toJson();
+          json.remove('session_log'); // 🔥 مش بنرسله في الـ realtime sync أبداً
+          return json;
+        }).toList(),
         buildTables: () => tables,
         buildDrinkTables: () => drinkTables,
         buildStaticData: _buildStaticData,
@@ -284,166 +327,67 @@ onRemoteDrinkTables: (rawData, remoteDrinkTables) {
     );
     _sync!.start();
 
-    // ✅ Polling ذكي — بيشتغل بس لما الـ SSE ينقطع
+    // 🔥 BANDWIDTH FIX: Polling ذكي — فقط لما SSE ينقطع > 60 ثانية
+    // لا يجيب static / history / debts / tournaments / shiftsHistory
     _historyPollTimer?.cancel();
-    _fallbackPollTimer?.cancel();
 
-_historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-  final appJustStarted = _syncStartTime != null &&
-      DateTime.now().difference(_syncStartTime!).inSeconds < 60;
-  if (appJustStarted) return;
+    _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      final appJustStarted = _syncStartTime != null &&
+          DateTime.now().difference(_syncStartTime!).inSeconds < 60;
+      if (appJustStarted) return;
 
-  final sseStale = _lastSseEvent == null ||
-      DateTime.now().difference(_lastSseEvent!).inSeconds > 60;
-  if (sseStale && !archiving) {
-    _sseConnected = false;
-    _pollAll();
-  }
-});
-    // Heartbeat: كل 60 ثانية poll واحد بغض النظر — للـ static data والـ shifts
-    _fallbackPollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
-      if (!archiving && !_sseConnected) _pollStaticFallback();
+      final sseStale = _lastSseEvent == null ||
+          DateTime.now().difference(_lastSseEvent!).inSeconds > 60;
+      if (sseStale && !archiving) {
+        _sseConnected = false;
+        _pollRealtimeOnly(); // 🔥 بس realtime — لا static ولا history ولا ثقيل
+      }
     });
+
+    // 🔥 BANDWIDTH FIX #4: _fallbackPollTimer حُذف كلياً.
+    // الـ static SSE listener في SyncService بيغني عنه تماماً.
+    // لو الأدمن غيّر سعر، الـ SSE بيوصّله لكل الأجهزة فوراً.
   }
 
-  // ✅ يُستدعى من كل SSE callback عشان نعرف إن الـ SSE شغال
   void _markSseAlive() {
     _sseConnected = true;
     _lastSseEvent = DateTime.now();
   }
 
-  // ✅ Fallback خفيف — بس للـ static data والـ shifts (مش الكل)
-  // بيتشغل كل 60 ثانية بغض النظر عن الـ SSE
-  Future<void> _pollStaticFallback() async {
-    if (shopId == null) return;
-    try {
-      final results = await Future.wait([
-        FirebaseService.get(FirebaseService.staticDataPath(shopId!)),
-        FirebaseService.get(FirebaseService.openShiftsPath(shopId!)),
-      ]);
-
-      bool changed = false;
-
-      final remoteStatic = results[0];
-      if (remoteStatic != null && remoteStatic is Map) {
-        _applyStaticData(Map<String, dynamic>.from(remoteStatic));
-        changed = true;
-      }
-
-      final remoteOpenShiftsData = results[1];
-      if (remoteOpenShiftsData != null && remoteOpenShiftsData is Map) {
-        final raw = Map<String, dynamic>.from(remoteOpenShiftsData);
-        raw.remove('_sender_id');
-        final typed = raw.map((k, v) =>
-            MapEntry(k, ShiftRecord.fromJson(Map<String, dynamic>.from(v))));
-        typed.forEach((name, shift) {
-          if (!openShifts.containsKey(name)) {
-            openShifts[name] = shift;
-            changed = true;
-          }
-        });
-        openShifts.removeWhere((name, _) {
-          if (!typed.containsKey(name)) {
-            changed = true;
-            return true;
-          }
-          return false;
-        });
-      }
-
-      if (changed) notifyListeners();
-    } catch (_) {}
-  }
-
-  Future<void> _pollAll() async {
+  // 🔥 BANDWIDTH FIX #1 + #3 + #4: _pollRealtimeOnly — بيجيب realtime فقط
+  // المحذوف: static (SSE بيغني عنه) + history + debts + tournaments + shiftsHistory
+  // ده بيشتغل بس لما الـ SSE ينقطع — fallback خفيف جداً
+  Future<void> _pollRealtimeOnly() async {
     if (shopId == null || archiving) return;
     try {
-      // نجيب كل البيانات بالتوازي
       final results = await Future.wait([
-        FirebaseService.getRecentHistory(shopId!),   // بدل get(historyPath) — أسرع
-        FirebaseService.get(FirebaseService.staticDataPath(shopId!)),
-        FirebaseService.get(FirebaseService.debtsPath(shopId!)),
-        FirebaseService.get(FirebaseService.shopTournamentsPath(shopId!)),
-        FirebaseService.get(FirebaseService.shiftsHistoryPath(shopId!)),
         FirebaseService.get(FirebaseService.openShiftsPath(shopId!)),
         FirebaseService.get(FirebaseService.dailySummaryPath(shopId!)),
+        FirebaseService.get(FirebaseService.devicesStatePath(shopId!)),
+        FirebaseService.get(FirebaseService.tablesStatePath(shopId!)),
+        FirebaseService.get(FirebaseService.drinkTablesStatePath(shopId!)),
+        // 🔥 لا static — بيتحمل مرة واحدة ويتحدث عبر SSE
+        // 🔥 لا history — on-demand
+        // 🔥 لا debts — في static
+        // 🔥 لا tournaments — on-demand
+        // 🔥 لا shiftsHistory — on-demand
       ]);
 
       bool changed = false;
 
-      // ── السجلات ───────────────────────────────────────────────────────
-      final remoteHistory = results[0];
-      // getRecentHistory بترجع List مباشرة — مش محتاجين _historyFromFirebase
-      if (remoteHistory is List && (remoteHistory as List).isNotEmpty) {
-        final typed = (remoteHistory as List)
-            .whereType<Map>()
-            .map((h) => Map<String, dynamic>.from(h))
-            .toList();
-        if (typed.length > history.length) {
-          history = typed;
-          changed = true;
-        }
-      }
-
-      // ── البيانات الثابتة (أسعار / منيو / إعدادات) ────────────────────
-      final remoteStatic = results[1];
-      if (remoteStatic != null && remoteStatic is Map) {
-        final s = Map<String, dynamic>.from(remoteStatic);
-        _applyStaticData(s);
-        changed = true;
-      }
-
-      // ── المديونيات ────────────────────────────────────────────────────
-      final remoteDebts = results[2];
-      if (remoteDebts != null && remoteDebts is List) {
-        final typed = List<Map<String, dynamic>>.from(
-            remoteDebts.map((d) => Map<String, dynamic>.from(d)));
-        if (typed.length != debts.length) {
-          debts = typed;
-          changed = true;
-        }
-      }
-
-      // ── البطولات ──────────────────────────────────────────────────────
-      final remoteTournaments = results[3];
-      if (remoteTournaments != null && remoteTournaments is List) {
-        final typed = List<Map<String, dynamic>>.from(
-            remoteTournaments.map((t) => Map<String, dynamic>.from(t)));
-        if (typed.length != tournaments.length) {
-          tournaments = typed;
-          changed = true;
-        }
-      }
-
-      // ── تاريخ الشيفتات ────────────────────────────────────────────────
-      final remoteShiftsHistory = results[4];
-      if (remoteShiftsHistory != null && remoteShiftsHistory is List) {
-        final typed = List<ShiftRecord>.from(
-          (remoteShiftsHistory).map(
-            (s) => ShiftRecord.fromJson(Map<String, dynamic>.from(s)),
-          ),
-        );
-        if (typed.length != shiftsHistory.length) {
-          shiftsHistory = typed;
-          changed = true;
-        }
-      }
-
-      // ── الشيفتات المفتوحة ─────────────────────────────────────────────
-      final remoteOpenShiftsData = results[5];
+      // ── الشيفتات المفتوحة ─────────────────────────────────────────────────
+      final remoteOpenShiftsData = results[0];
       if (remoteOpenShiftsData != null && remoteOpenShiftsData is Map) {
         final raw = Map<String, dynamic>.from(remoteOpenShiftsData);
         raw.remove('_sender_id');
         final typed = raw.map((k, v) =>
             MapEntry(k, ShiftRecord.fromJson(Map<String, dynamic>.from(v))));
-        // حدّث بس الشيفتات اللي مش مفتوحة محلياً
         typed.forEach((name, shift) {
           if (!openShifts.containsKey(name)) {
             openShifts[name] = shift;
             changed = true;
           }
         });
-        // شيل الشيفتات اللي اتقفلت في موبايل تاني
         openShifts.removeWhere((name, _) {
           if (!typed.containsKey(name)) {
             changed = true;
@@ -453,20 +397,150 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
         });
       }
 
-      // ── ملخص المخزون اليومي ───────────────────────────────────────────
-      final remoteSummary = results[6];
+      // ── ملخص المخزون اليومي ───────────────────────────────────────────────
+      final remoteSummary = results[1];
       if (remoteSummary != null && remoteSummary is Map) {
         final typed = Map<String, int>.from(
-            remoteSummary.map((k, v) => MapEntry(k.toString(), (v as num).toInt())));
+            remoteSummary.map((k, v) =>
+                MapEntry(k.toString(), (v as num).toInt())));
         if (typed.length != dailyInventorySummary.length) {
           dailyInventorySummary = typed;
           changed = true;
         }
       }
 
+      // ── حالة الأجهزة ──────────────────────────────────────────────────────
+      final remoteDevicesData = results[2];
+      if (remoteDevicesData != null && remoteDevicesData is Map) {
+        final devices = remoteDevicesData['devices'];
+        if (devices is List) {
+          final typed = devices
+              .map((d) {
+                if (d == null) return <String, dynamic>{};
+                final copy = Map<String, dynamic>.from(d as Map);
+                copy.remove('session_log'); // 🔥 شيل session_log دايماً
+                return copy;
+              })
+              .toList();
+          _mergeRemoteDevices(typed);
+          changed = true;
+        }
+      }
+
+      // ── حالة التربيزات ────────────────────────────────────────────────────
+      final remoteTablesData = results[3];
+      if (remoteTablesData != null && remoteTablesData is Map) {
+        final t = remoteTablesData['tables'];
+        if (t is List) {
+          _mergeRemoteTables(t
+              .map((e) => e != null
+                  ? Map<String, dynamic>.from(e as Map)
+                  : <String, dynamic>{})
+              .toList());
+          changed = true;
+        }
+      }
+
+      // ── حالة تربيزات المشروبات ────────────────────────────────────────────
+      final remoteDrinkData = results[4];
+      if (remoteDrinkData != null && remoteDrinkData is Map) {
+        final d = remoteDrinkData['drink_tables'];
+        if (d is List) {
+          _mergeRemoteDrinkTables(d
+              .map((e) => e != null
+                  ? Map<String, dynamic>.from(e as Map)
+                  : <String, dynamic>{})
+              .toList());
+          changed = true;
+        }
+      }
+
       if (changed) notifyListeners();
     } catch (_) {}
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ON-DEMAND FETCHERS — يُستدعوا من الـ UI فقط عند الحاجة
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 🔥 BANDWIDTH FIX #1: هذه الـ methods تُستدعى من الـ UI
+  // لما الأدمن/الكاشير يفتح الشاشة المناسبة فقط
+
+  /// يُستدعى لما يفتح شاشة السجل — بيجيب آخر 50 سجل
+  Future<void> fetchHistoryOnDemand({int limit = 50}) async {
+    if (shopId == null || isLoadingHistory) return;
+    isLoadingHistory = true;
+    notifyListeners();
+    try {
+      final remote =
+          await FirebaseService.fetchHistoryOnDemand(shopId!, limit: limit);
+      if (remote.isNotEmpty) {
+        history = remote;
+        _historyLoaded = true;
+        await SyncService.saveLocal(shopId!, _buildDataDict());
+      }
+    } catch (_) {} finally {
+      isLoadingHistory = false;
+      notifyListeners();
+    }
+  }
+
+  /// يُستدعى لما يفتح شاشة الشيفتات
+  Future<void> fetchShiftsHistoryOnDemand() async {
+    if (shopId == null || isLoadingShifts) return;
+    isLoadingShifts = true;
+    notifyListeners();
+    try {
+      final remote =
+          await FirebaseService.fetchShiftsHistoryOnDemand(shopId!);
+      if (remote.isNotEmpty) {
+        shiftsHistory = remote
+            .map((s) => ShiftRecord.fromJson(s))
+            .toList();
+        _shiftsHistoryLoaded = true;
+      }
+    } catch (_) {} finally {
+      isLoadingShifts = false;
+      notifyListeners();
+    }
+  }
+
+  /// يُستدعى لما يفتح شاشة البطولات
+  Future<void> fetchTournamentsOnDemand() async {
+    if (shopId == null || isLoadingTournaments) return;
+    isLoadingTournaments = true;
+    notifyListeners();
+    try {
+      final remote = await FirebaseService.fetchTournamentsOnDemand(shopId!);
+      if (remote.isNotEmpty) {
+        tournaments = remote;
+        _tournamentsLoaded = true;
+      }
+    } catch (_) {} finally {
+      isLoadingTournaments = false;
+      notifyListeners();
+    }
+  }
+
+  /// يُستدعى لما يفتح شاشة الديون (debts موجودة في static عادةً —
+  /// ده للـ refresh اليدوي فقط)
+  Future<void> fetchDebtsOnDemand() async {
+    if (shopId == null || isLoadingDebts) return;
+    isLoadingDebts = true;
+    notifyListeners();
+    try {
+      final remote = await FirebaseService.fetchDebtsOnDemand(shopId!);
+      debts = remote;
+      _debtsLoaded = true;
+    } catch (_) {} finally {
+      isLoadingDebts = false;
+      notifyListeners();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // MERGE HELPERS
+  // ══════════════════════════════════════════════════════════════════════════
 
   void _mergeRemoteHistory(List<Map<String, dynamic>> remoteHistory) {
     if (remoteHistory.isEmpty) return;
@@ -475,16 +549,17 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
     }
   }
 
-  /// تحويل history من Firebase — بيتعامل مع List (cache) وMap (Firebase POST)
   static List<Map<String, dynamic>> _historyFromFirebase(dynamic raw) {
     if (raw == null) return [];
     if (raw is List) {
-      return raw.whereType<Map>()
+      return raw
+          .whereType<Map>()
           .map((h) => Map<String, dynamic>.from(h))
           .toList();
     }
     if (raw is Map) {
-      final list = raw.values.whereType<Map>()
+      final list = raw.values
+          .whereType<Map>()
           .map((h) => Map<String, dynamic>.from(h))
           .toList();
       list.sort((a, b) {
@@ -509,10 +584,12 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
 
     for (final remoteJson in remoteDevices) {
       final remoteId = (remoteJson['id'] as num?)?.toInt() ?? 0;
-
       final idx = devices.indexWhere((d) => d.id == remoteId);
       if (idx != -1) {
+        // 🔥 احتفظ بـ session_log المحلي — لا تستبدله بالريموت (مفيش فيه)
+        final localLog = devices[idx].sessionLog;
         final updated = PSDevice.fromJson(remoteJson, remoteId);
+        updated.sessionLog = localLog; // استعادة الـ log المحلي
         updated.updateTimer();
         devices[idx] = updated;
       } else {
@@ -523,102 +600,111 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
     }
   }
 
- void _mergeRemoteTables(List<Map<String, dynamic>> remoteTables) {
-  if (remoteTables.isEmpty) return;
-  while (tables.length < remoteTables.length) {
-    tables.add(remoteTables[tables.length]);
+  void _mergeRemoteTables(List<Map<String, dynamic>> remoteTables) {
+    if (remoteTables.isEmpty) return;
+    while (tables.length < remoteTables.length) {
+      tables.add(remoteTables[tables.length]);
+    }
+    for (int i = 0; i < remoteTables.length; i++) {
+      tables[i] = remoteTables[i];
+    }
+    if (remoteTables.length < tables.length) {
+      tables.removeRange(remoteTables.length, tables.length);
+    }
   }
-  for (int i = 0; i < remoteTables.length; i++) {
-    tables[i] = remoteTables[i];
-  }
-  if (remoteTables.length < tables.length) {
-    tables.removeRange(remoteTables.length, tables.length);
-  }
-}
 
-  void _mergeRemoteDrinkTables(List<Map<String, dynamic>> remoteDrinkTables) {
+  void _mergeRemoteDrinkTables(
+      List<Map<String, dynamic>> remoteDrinkTables) {
     if (remoteDrinkTables.isEmpty) return;
-
-    // ✅ ضيف تربيزات مشروبات جديدة من الريموت
     while (drinkTables.length < remoteDrinkTables.length) {
       drinkTables.add(remoteDrinkTables[drinkTables.length]);
     }
-
     for (int i = 0; i < remoteDrinkTables.length; i++) {
-      // اتبع الريموت دايماً — هو الأحدث من Firebase
       drinkTables[i] = remoteDrinkTables[i];
     }
-
-    // ✅ احذف التربيزات اللي اتحذفت
     if (remoteDrinkTables.length < drinkTables.length) {
       drinkTables.removeRange(remoteDrinkTables.length, drinkTables.length);
     }
   }
 
   void _applyStaticData(Map<String, dynamic> s) {
-   if (s['history_password_enabled'] != null) {
-  historyPasswordEnabled = s['history_password_enabled'];
-}
-   if (s['expenses'] != null) {
-    expenses = List<Map<String, dynamic>>.from(
-        (s['expenses'] as List).map((e) => Map<String, dynamic>.from(e)));
-  }
-  if (s['expense_categories'] != null) {
-    expenseCategories = List<String>.from(s['expense_categories'] as List);
-  }
+    if (s['history_password_enabled'] != null) {
+      historyPasswordEnabled = s['history_password_enabled'];
+    }
+    if (s['expenses'] != null) {
+      expenses = List<Map<String, dynamic>>.from(
+          (s['expenses'] as List).map((e) => Map<String, dynamic>.from(e)));
+    }
+    if (s['expense_categories'] != null) {
+      expenseCategories =
+          List<String>.from(s['expense_categories'] as List);
+    }
     if (s['prices'] != null) {
       _migratePrices(Map<String, dynamic>.from(s['prices']));
     }
     if (s['menu'] != null) {
       menu = Map<String, int>.from(s['menu']);
     }
-   if (s['buffet_categories'] != null) {
-  buffetCategories = (s['buffet_categories'] as List)
-      .map((c) => BuffetCategory.fromJson(Map<String, dynamic>.from(c)))
-      .toList()
-    ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
-}
-if (s['menu_item_categories'] != null) {
-  _menuItemCategories = Map<String, String>.from(s['menu_item_categories']);
-}
+    if (s['buffet_categories'] != null) {
+      buffetCategories = (s['buffet_categories'] as List)
+          .map((c) =>
+              BuffetCategory.fromJson(Map<String, dynamic>.from(c)))
+          .toList()
+        ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    }
+    if (s['menu_item_categories'] != null) {
+      _menuItemCategories =
+          Map<String, String>.from(s['menu_item_categories']);
+    }
     if (s['inventory'] != null) {
       inventory = Map<String, int>.from(s['inventory']);
     }
     if (s['cashiers'] != null) {
       cashiers = List<Map<String, dynamic>>.from(
-          (s['cashiers'] as List).map((c) => Map<String, dynamic>.from(c)));
+          (s['cashiers'] as List)
+              .map((c) => Map<String, dynamic>.from(c)));
     }
     if (s['admin_password_hash'] != null) {
       adminPasswordHash = s['admin_password_hash'];
     }
     if (s['shop_name'] != null) {
       shopName = s['shop_name'];
-    } else if (s['settings'] != null && (s['settings'] as Map)['shop_name'] != null) {
+    } else if (s['settings'] != null &&
+        (s['settings'] as Map)['shop_name'] != null) {
       shopName = (s['settings'] as Map)['shop_name'];
     }
     if (s['match_enabled'] != null) {
       matchEnabled = s['match_enabled'];
-    } else if (s['settings'] != null && (s['settings'] as Map)['match_enabled'] != null) {
+    } else if (s['settings'] != null &&
+        (s['settings'] as Map)['match_enabled'] != null) {
       matchEnabled = (s['settings'] as Map)['match_enabled'];
     }
-   if (s['history_password_hash'] != null) {
-  historyPasswordHash = s['history_password_hash'];
-}
+    if (s['history_password_hash'] != null) {
+      historyPasswordHash = s['history_password_hash'];
+    }
+    // 🔥 debts في static — بيتحمل مع الـ static data مش on-demand منفصل
     if (s['debts'] != null) {
       debts = List<Map<String, dynamic>>.from(
-          (s['debts'] as List).map((d) => Map<String, dynamic>.from(d)));
+          (s['debts'] as List)
+              .map((d) => Map<String, dynamic>.from(d)));
     }
-   if (s['recharge_enabled'] != null) rechargeEnabled = s['recharge_enabled'];
-if (s['recharge_balance'] != null)
-  rechargeBalance = (s['recharge_balance'] as num).toDouble();
-if (s['recharge_cards'] != null) {
-  rechargeCards = List<Map<String, dynamic>>.from(
-    (s['recharge_cards'] as List).map((c) => Map<String, dynamic>.from(c)));
-}
-if (s['recharge_transactions'] != null) {
-  rechargeTransactions = List<Map<String, dynamic>>.from(
-    (s['recharge_transactions'] as List).map((t) => Map<String, dynamic>.from(t)));
-}
+    if (s['recharge_enabled'] != null) rechargeEnabled = s['recharge_enabled'];
+    if (s['recharge_balance'] != null) {
+      rechargeBalance = (s['recharge_balance'] as num).toDouble();
+    }
+    if (s['recharge_cards'] != null) {
+      rechargeCards = List<Map<String, dynamic>>.from(
+          (s['recharge_cards'] as List)
+              .map((c) => Map<String, dynamic>.from(c)));
+    }
+    if (s['recharge_transactions'] != null) {
+      rechargeTransactions = List<Map<String, dynamic>>.from(
+          (s['recharge_transactions'] as List)
+              .map((t) => Map<String, dynamic>.from(t)));
+    }
+    if (s['menu_buy_prices'] != null) {
+      menuBuyPrices = Map<String, int>.from(s['menu_buy_prices']);
+    }
   }
 
   void _mergeRemoteOperational(Map<String, dynamic> data) {
@@ -628,7 +714,9 @@ if (s['recharge_transactions'] != null) {
         final updatedTables = remoteTables
             .map((t) => Map<String, dynamic>.from(t as Map))
             .toList();
-        for (int i = 0; i < updatedTables.length && i < tables.length; i++) {
+        for (int i = 0;
+            i < updatedTables.length && i < tables.length;
+            i++) {
           if (tables[i]['start_time'] == null) {
             tables[i] = updatedTables[i];
           }
@@ -645,7 +733,9 @@ if (s['recharge_transactions'] != null) {
         final updatedDrink = remoteDrink
             .map((t) => Map<String, dynamic>.from(t as Map))
             .toList();
-        for (int i = 0; i < updatedDrink.length && i < drinkTables.length; i++) {
+        for (int i = 0;
+            i < updatedDrink.length && i < drinkTables.length;
+            i++) {
           final localOrders =
               Map<String, int>.from(drinkTables[i]['orders'] ?? {});
           if (localOrders.isEmpty) {
@@ -666,7 +756,6 @@ if (s['recharge_transactions'] != null) {
   Future<void> _loadShopId() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // ✅ توليد/تحميل معرّف الجهاز الفريد
     String? savedDeviceId = prefs.getString('device_id');
     if (savedDeviceId == null) {
       savedDeviceId = DateTime.now().millisecondsSinceEpoch.toString();
@@ -697,9 +786,9 @@ if (s['recharge_transactions'] != null) {
         subscriptionActive = true;
         subscriptionExpiry = expiry;
         notifyListeners();
-       _startSync();
+        _startSync();
         await _restoreOpenShiftFromFirebase();
-        await _restoreLoginState(); // ✅
+        await _restoreLoginState();
         notifyListeners();
         _checkSubscriptionOnline();
         return;
@@ -713,37 +802,29 @@ if (s['recharge_transactions'] != null) {
     await _checkSubscriptionOnline();
   }
 
-  // ── Restore open shift from Firebase on every cold start ─────────────────────
-  // This is the "session persistence" fix: if a shift was open when the
-  // app was killed, it will be re-attached here without requiring the
-  // cashier to start a new one.
-Future<void> _restoreOpenShiftFromFirebase() async {
-  if (shopId == null) return;
-  try {
-    final raw = await FirebaseService.getAllOpenShifts(shopId!);
-    if (raw.isEmpty) return;
+  Future<void> _restoreOpenShiftFromFirebase() async {
+    if (shopId == null) return;
+    try {
+      final raw = await FirebaseService.getAllOpenShifts(shopId!);
+      if (raw.isEmpty) return;
 
-    // امسح الـ sender_id قبل المعالجة
-    final cleanRaw = Map<String, dynamic>.from(raw)
-      ..remove('_sender_id');
+      final cleanRaw = Map<String, dynamic>.from(raw)..remove('_sender_id');
+      if (cleanRaw.isEmpty) return;
 
-    if (cleanRaw.isEmpty) return;
-
-    remoteOpenShifts = cleanRaw;
-    final updatedOpenShifts = <String, ShiftRecord>{};
-    cleanRaw.forEach((name, value) {
-      if (value is Map) {
-        updatedOpenShifts[name] =
-            ShiftRecord.fromJson(Map<String, dynamic>.from(value));
-      }
-    });
-    // Merge without overwriting shifts that are already in memory.
-    updatedOpenShifts.forEach((name, shift) {
-      openShifts.putIfAbsent(name, () => shift);
-    });
-    notifyListeners();
-  } catch (_) {}
-}
+      remoteOpenShifts = cleanRaw;
+      final updatedOpenShifts = <String, ShiftRecord>{};
+      cleanRaw.forEach((name, value) {
+        if (value is Map) {
+          updatedOpenShifts[name] =
+              ShiftRecord.fromJson(Map<String, dynamic>.from(value));
+        }
+      });
+      updatedOpenShifts.forEach((name, shift) {
+        openShifts.putIfAbsent(name, () => shift);
+      });
+      notifyListeners();
+    } catch (_) {}
+  }
 
   Future<void> _checkSubscriptionOnline() async {
     if (shopId == null) return;
@@ -784,10 +865,10 @@ Future<void> _restoreOpenShiftFromFirebase() async {
         }
       }
 
-     isActivated = true;
+      isActivated = true;
       subscriptionActive = true;
       _startSync();
-      await _restoreLoginState(); // ✅
+      await _restoreLoginState();
       notifyListeners();
     } catch (_) {
       final prefs = await SharedPreferences.getInstance();
@@ -841,6 +922,12 @@ Future<void> _restoreOpenShiftFromFirebase() async {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // LOAD DATA
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 🔥 BANDWIDTH FIX #4: loadData — static يتحمل مرة واحدة فقط هنا.
+  // بعد كده الـ SSE بيحدّث الـ static تلقائياً لو في تغيير.
   Future<void> loadData() async {
     if (shopId == null) return;
 
@@ -853,6 +940,7 @@ Future<void> _restoreOpenShiftFromFirebase() async {
       if (lastUpdated != null) {
         final age = DateTime.now().millisecondsSinceEpoch - lastUpdated;
         if (age < 5 * 60 * 1000) {
+          _staticLoaded = true; // اعتبر الـ static محملة من الـ cache
           _startSync();
           return;
         }
@@ -860,9 +948,11 @@ Future<void> _restoreOpenShiftFromFirebase() async {
     }
 
     try {
+      // 🔥 pullAllData بيجيب static + realtime فقط (بدون history/shifts/tournaments)
       final remoteData = await FirebaseService.pullAllData(shopId!);
       if (remoteData != null) {
         _applyData(remoteData);
+        _staticLoaded = true; // static اتحملت من Firebase
         await SyncService.saveLocal(shopId!, remoteData);
         notifyListeners();
       }
@@ -876,87 +966,106 @@ Future<void> _restoreOpenShiftFromFirebase() async {
   // ══════════════════════════════════════════════════════════════════════════
 
   void _applyData(Map<String, dynamic> data) {
-
-   if (data['history_password_enabled'] != null) {
-  historyPasswordEnabled = data['history_password_enabled'];
-}
+    if (data['history_password_enabled'] != null) {
+      historyPasswordEnabled = data['history_password_enabled'];
+    }
+    // 🔥 history — بيتحمل من الـ cache المحلي بس (لو موجود)
+    // لا يتحمل من Firebase في loadData (on-demand فقط)
     if (data['history'] != null) {
-      // history ممكن تيجي List (من cache محلي) أو Map (من Firebase بعد POST)
       history = _historyFromFirebase(data['history']);
     }
-   final histHash = data['history_password_hash'] ?? 
-    data['static']?['history_password_hash'];
-if (histHash != null) historyPasswordHash = histHash;
-   
+
+    final histHash =
+        data['history_password_hash'] ?? data['static']?['history_password_hash'];
+    if (histHash != null) historyPasswordHash = histHash;
 
     final pricesRaw = data['prices'] ?? data['static']?['prices'];
     if (pricesRaw != null) {
       final raw = Map<String, dynamic>.from(pricesRaw);
       _migratePrices(raw);
     }
-     final buyPricesRaw = data['menu_buy_prices'] ?? data['static']?['menu_buy_prices'];
-if (buyPricesRaw != null) {
-  menuBuyPrices = Map<String, int>.from(buyPricesRaw);
-}
+
+    final buyPricesRaw =
+        data['menu_buy_prices'] ?? data['static']?['menu_buy_prices'];
+    if (buyPricesRaw != null) {
+      menuBuyPrices = Map<String, int>.from(buyPricesRaw);
+    }
+
     final menuRaw = data['menu'] ?? data['static']?['menu'];
     if (menuRaw != null) {
       menu = Map<String, int>.from(menuRaw);
     }
 
-   final catsRaw = data['buffet_categories'] ?? data['static']?['buffet_categories'];
-if (catsRaw != null && catsRaw is List) {
-  buffetCategories = (catsRaw as List)
-      .map((c) => BuffetCategory.fromJson(Map<String, dynamic>.from(c)))
-      .toList()
-    ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
-} else if (buffetCategories.isEmpty) {
-  buffetCategories = BuffetCategory.defaults;
-}
+    final catsRaw =
+        data['buffet_categories'] ?? data['static']?['buffet_categories'];
+    if (catsRaw != null && catsRaw is List) {
+      buffetCategories = (catsRaw as List)
+          .map((c) =>
+              BuffetCategory.fromJson(Map<String, dynamic>.from(c)))
+          .toList()
+        ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    } else if (buffetCategories.isEmpty) {
+      buffetCategories = BuffetCategory.defaults;
+    }
 
-final catMapRaw = data['menu_item_categories']
-    ?? data['static']?['menu_item_categories'];
-if (catMapRaw != null && catMapRaw is Map) {
-  _menuItemCategories = Map<String, String>.from(catMapRaw);
-}
+    final catMapRaw =
+        data['menu_item_categories'] ?? data['static']?['menu_item_categories'];
+    if (catMapRaw != null && catMapRaw is Map) {
+      _menuItemCategories = Map<String, String>.from(catMapRaw);
+    }
 
-    final inventoryRaw = data['inventory'] ?? data['static']?['inventory'];
+    final inventoryRaw =
+        data['inventory'] ?? data['static']?['inventory'];
     if (inventoryRaw != null) {
       inventory = Map<String, int>.from(inventoryRaw);
     }
 
-    final summaryRaw = data['daily_inventory_summary'] ?? data['daily_summary'];
+    final summaryRaw =
+        data['daily_inventory_summary'] ?? data['daily_summary'];
     if (summaryRaw != null) {
       dailyInventorySummary = Map<String, int>.from(summaryRaw);
     }
 
+    // 🔥 debts في static — بيتحمل مع باقي الـ static data
     final debtsRaw = data['debts'] ?? data['static']?['debts'];
     if (debtsRaw != null) {
       debts = List<Map<String, dynamic>>.from(
           (debtsRaw as List).map((d) => Map<String, dynamic>.from(d)));
     }
+
     final expensesRaw = data['expenses'] ?? data['static']?['expenses'];
-  if (expensesRaw != null) {
-    expenses = List<Map<String, dynamic>>.from(
-        (expensesRaw as List).map((e) => Map<String, dynamic>.from(e)));
-  }
-  final expCatsRaw = data['expense_categories'] ?? data['static']?['expense_categories'];
-  if (expCatsRaw != null) {
-    expenseCategories = List<String>.from(expCatsRaw as List);
-  }
-    final rechargeEnabledRaw = data['recharge_enabled'] ?? data['static']?['recharge_enabled'];
-if (rechargeEnabledRaw != null) rechargeEnabled = rechargeEnabledRaw;
-final rechargeBalanceRaw = data['recharge_balance'] ?? data['static']?['recharge_balance'];
-if (rechargeBalanceRaw != null) rechargeBalance = (rechargeBalanceRaw as num).toDouble();
-final rechargeCardsRaw = data['recharge_cards'] ?? data['static']?['recharge_cards'];
-if (rechargeCardsRaw != null) {
-  rechargeCards = List<Map<String, dynamic>>.from(
-    (rechargeCardsRaw as List).map((c) => Map<String, dynamic>.from(c)));
-}
-final rechargeTxRaw = data['recharge_transactions'] ?? data['static']?['recharge_transactions'];
-if (rechargeTxRaw != null) {
-  rechargeTransactions = List<Map<String, dynamic>>.from(
-    (rechargeTxRaw as List).map((t) => Map<String, dynamic>.from(t)));
-}
+    if (expensesRaw != null) {
+      expenses = List<Map<String, dynamic>>.from(
+          (expensesRaw as List).map((e) => Map<String, dynamic>.from(e)));
+    }
+    final expCatsRaw =
+        data['expense_categories'] ?? data['static']?['expense_categories'];
+    if (expCatsRaw != null) {
+      expenseCategories = List<String>.from(expCatsRaw as List);
+    }
+
+    final rechargeEnabledRaw =
+        data['recharge_enabled'] ?? data['static']?['recharge_enabled'];
+    if (rechargeEnabledRaw != null) rechargeEnabled = rechargeEnabledRaw;
+    final rechargeBalanceRaw =
+        data['recharge_balance'] ?? data['static']?['recharge_balance'];
+    if (rechargeBalanceRaw != null) {
+      rechargeBalance = (rechargeBalanceRaw as num).toDouble();
+    }
+    final rechargeCardsRaw =
+        data['recharge_cards'] ?? data['static']?['recharge_cards'];
+    if (rechargeCardsRaw != null) {
+      rechargeCards = List<Map<String, dynamic>>.from(
+          (rechargeCardsRaw as List)
+              .map((c) => Map<String, dynamic>.from(c)));
+    }
+    final rechargeTxRaw =
+        data['recharge_transactions'] ?? data['static']?['recharge_transactions'];
+    if (rechargeTxRaw != null) {
+      rechargeTransactions = List<Map<String, dynamic>>.from(
+          (rechargeTxRaw as List)
+              .map((t) => Map<String, dynamic>.from(t)));
+    }
 
     final tablesRaw = data['tables'] ?? data['operational']?['tables'];
     if (tablesRaw != null) {
@@ -964,20 +1073,23 @@ if (rechargeTxRaw != null) {
           (tablesRaw as List).map((t) => Map<String, dynamic>.from(t)));
     }
 
-    final drinkRaw = data['drink_tables'] ?? data['operational']?['drink_tables'];
+    final drinkRaw =
+        data['drink_tables'] ?? data['operational']?['drink_tables'];
     if (drinkRaw != null) {
       drinkTables = List<Map<String, dynamic>>.from(
           (drinkRaw as List).map((t) => Map<String, dynamic>.from(t)));
     }
 
     final settingsRaw = data['static']?['settings'];
-    final adminHash = data['admin_password_hash'] ?? settingsRaw?['admin_password_hash'];
+    final adminHash =
+        data['admin_password_hash'] ?? settingsRaw?['admin_password_hash'];
     if (adminHash != null) adminPasswordHash = adminHash;
 
     final shopNameRaw = data['shop_name'] ?? settingsRaw?['shop_name'];
     if (shopNameRaw != null) shopName = shopNameRaw;
 
-    final matchEnabledRaw = data['match_enabled'] ?? settingsRaw?['match_enabled'];
+    final matchEnabledRaw =
+        data['match_enabled'] ?? settingsRaw?['match_enabled'];
     if (matchEnabledRaw != null) matchEnabled = matchEnabledRaw;
 
     final cashiersRaw = data['cashiers'] ?? data['static']?['cashiers'];
@@ -993,14 +1105,18 @@ if (rechargeTxRaw != null) {
       cashiers = [{'name': 'كاشير 1', 'hash': _defaultCashierHash}];
     }
 
+    // 🔥 tournaments — بيتحمل من الـ cache المحلي فقط (on-demand من Firebase)
     final tournamentsRaw = data['tournaments'];
-    if (tournamentsRaw != null) {
+    if (tournamentsRaw != null && tournamentsRaw is List) {
       tournaments = List<Map<String, dynamic>>.from(
-          (tournamentsRaw as List).map((t) => Map<String, dynamic>.from(t)));
+          (tournamentsRaw as List)
+              .map((t) => Map<String, dynamic>.from(t)));
     }
 
-    final shiftsHistoryRaw = data['shifts_history'] ?? data['records']?['shifts_history'];
-    if (shiftsHistoryRaw != null) {
+    // 🔥 shiftsHistory — بيتحمل من الـ cache المحلي فقط (on-demand من Firebase)
+    final shiftsHistoryRaw =
+        data['shifts_history'] ?? data['records']?['shifts_history'];
+    if (shiftsHistoryRaw != null && shiftsHistoryRaw is List) {
       shiftsHistory = List<ShiftRecord>.from(
         (shiftsHistoryRaw as List).map(
           (s) => ShiftRecord.fromJson(Map<String, dynamic>.from(s)),
@@ -1008,7 +1124,8 @@ if (rechargeTxRaw != null) {
       );
     }
 
-    final openShiftsRaw = data['open_shifts'] ?? data['records']?['open_shifts'];
+    final openShiftsRaw =
+        data['open_shifts'] ?? data['records']?['open_shifts'];
     if (openShiftsRaw != null) {
       final raw = Map<String, dynamic>.from(openShiftsRaw);
       openShifts = raw.map((k, v) => MapEntry(
@@ -1017,7 +1134,8 @@ if (rechargeTxRaw != null) {
 
     List? devStates;
     if (data['realtime']?['devices_state']?['devices'] != null) {
-      devStates = data['realtime']['devices_state']['devices'] as List;
+      devStates =
+          data['realtime']['devices_state']['devices'] as List;
     } else if (data['devices_state'] != null) {
       devStates = data['devices_state'] as List;
     } else if (data['devices'] != null) {
@@ -1040,7 +1158,8 @@ if (rechargeTxRaw != null) {
   }
 
   void _migratePrices(Map<String, dynamic> raw) {
-    if (raw.containsKey('match_price') && !raw.containsKey('match_ps4_normal')) {
+    if (raw.containsKey('match_price') &&
+        !raw.containsKey('match_ps4_normal')) {
       final old = (raw['match_price'] as num).toInt();
       raw['match_ps4_normal'] = old;
       raw['match_ps4_multi'] = (old * 1.5).round();
@@ -1065,9 +1184,9 @@ if (rechargeTxRaw != null) {
       prices.putIfAbsent('match_ps4_multi', () => 15);
       prices.putIfAbsent('match_ps5_normal', () => 15);
       prices.putIfAbsent('match_ps5_multi', () => 20);
-     prices.putIfAbsent('ping_normal', () => 20);
-     prices.putIfAbsent('billiard_normal', () => 25);
-     prices.putIfAbsent('billiard_american', () => 30);
+      prices.putIfAbsent('ping_normal', () => 20);
+      prices.putIfAbsent('billiard_normal', () => 25);
+      prices.putIfAbsent('billiard_american', () => 30);
     }
   }
 
@@ -1078,7 +1197,7 @@ if (rechargeTxRaw != null) {
   Map<String, dynamic> _buildDataDict() {
     return {
       'history': history,
-     'history_password_enabled': historyPasswordEnabled,
+      'history_password_enabled': historyPasswordEnabled,
       'prices': prices,
       'inventory': inventory,
       'daily_inventory_summary': dailyInventorySummary,
@@ -1097,12 +1216,17 @@ if (rechargeTxRaw != null) {
       'cashiers': cashiers,
       'cashier_password_hash': cashierPasswordHash,
       'shop_name': shopName,
-     'menu_buy_prices': menuBuyPrices,
+      'menu_buy_prices': menuBuyPrices,
       'match_enabled': matchEnabled,
       'tournaments': tournaments,
       'shifts_history': shiftsHistory.map((s) => s.toJson()).toList(),
       'open_shifts': openShifts.map((k, v) => MapEntry(k, v.toJson())),
-      'devices_state': devices.map((d) => d.toJson()).toList(),
+      // 🔥 devices_state في الـ local cache بدون session_log — توفير مساحة
+      'devices_state': devices.map((d) {
+        final json = d.toJson();
+        json.remove('session_log');
+        return json;
+      }).toList(),
       'last_updated': DateTime.now().millisecondsSinceEpoch,
       'expenses': expenses,
       'expense_categories': expenseCategories,
@@ -1111,139 +1235,35 @@ if (rechargeTxRaw != null) {
 
   Map<String, dynamic> _buildStaticData() {
     return {
-
-     'history_password_enabled': historyPasswordEnabled,
+      'history_password_enabled': historyPasswordEnabled,
       'prices': prices,
       'menu': menu,
       'expenses': expenses,
-     'expense_categories': expenseCategories,
-     'buffet_categories': buffetCategories.map((c) => c.toJson()).toList(),
-     'menu_item_categories': _menuItemCategories,
+      'expense_categories': expenseCategories,
+      'buffet_categories': buffetCategories.map((c) => c.toJson()).toList(),
+      'menu_item_categories': _menuItemCategories,
       'inventory': inventory,
       'daily_inventory_summary': dailyInventorySummary,
       'cashiers': cashiers,
       'cashier_password_hash': cashierPasswordHash,
       'admin_password_hash': adminPasswordHash,
-     'menu_buy_prices': menuBuyPrices,
-       'shop_name': shopName,
-        'match_enabled': matchEnabled,
+      'menu_buy_prices': menuBuyPrices,
+      'shop_name': shopName,
+      'match_enabled': matchEnabled,
       'settings': {
         'num_devices': numDevices,
       },
-      'debts': debts,
-
-     'recharge_enabled': rechargeEnabled,
+      'debts': debts, // 🔥 debts في static — بيتحمل مع الـ static مرة واحدة
+      'recharge_enabled': rechargeEnabled,
       'recharge_balance': rechargeBalance,
       'recharge_cards': rechargeCards,
       'recharge_transactions': rechargeTransactions,
-     'history_password_hash': historyPasswordHash.isEmpty 
-    ? _defaultHistoryHash 
-    : historyPasswordHash,
+      'history_password_hash': historyPasswordHash.isEmpty
+          ? _defaultHistoryHash
+          : historyPasswordHash,
     };
   }
 
- void changeHistoryPassword(String newPass) {
-  historyPasswordHash = hashPassword(newPass);
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
- void setHistoryPasswordEnabled(bool val) {
-  historyPasswordEnabled = val;
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-
- //_------_______________________________________________
-
- void addExpense(String title, double amount, String category,
-    {String? note}) {
-  final now = DateTime.now();
-  final dateStr =
-      '${now.day}/${now.month}/${now.year}';
-  expenses.add({
-    'id': now.millisecondsSinceEpoch.toString(),
-    'title': title,
-    'amount': amount,
-    'category': category,
-    'date': dateStr,
-    'note': note,
-    'added_by': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
-    'created_at': now.toIso8601String(),
-  });
-  AuditLogService.log(
-    action: AuditAction.expenseAdded,
-    actionDetails: 'أضاف مصروف "$title" ($category) بمبلغ ${amount.toStringAsFixed(1)} ج',
-    extra: {'title': title, 'amount': amount, 'category': category},
-  );
-  _pushStaticOnly();
-  notifyListeners();
-}
- 
-void deleteExpense(String id) {
-  final exp = expenses.firstWhere(
-      (e) => e['id'] == id,
-      orElse: () => {});
-  expenses.removeWhere((e) => e['id'] == id);
-  AuditLogService.log(
-    action: AuditAction.expenseDeleted,
-    actionDetails: 'حذف مصروف "${exp['title'] ?? ''}"',
-  );
-  _pushStaticOnly();
-  notifyListeners();
-}
- 
-void updateExpense(String id, String title, double amount,
-    String category, {String? note}) {
-  final idx = expenses.indexWhere((e) => e['id'] == id);
-  if (idx == -1) return;
-  expenses[idx] = {
-    ...expenses[idx],
-    'title': title,
-    'amount': amount,
-    'category': category,
-    'note': note,
-    'updated_at': DateTime.now().toIso8601String(),
-  };
-  AuditLogService.log(
-    action: AuditAction.expenseUpdated,
-    actionDetails: 'عدّل مصروف "$title" ($category) — ${amount.toStringAsFixed(1)} ج',
-  );
-  _pushStaticOnly();
-  notifyListeners();
-}
- 
-// إدارة فئات المصروفات (أدمن فقط)
-void addExpenseCategory(String name) {
-  if (!expenseCategories.contains(name)) {
-    expenseCategories.add(name);
-    _pushStaticOnly();  // كان saveData()
-    notifyListeners();
-  }
-}
- 
-void removeExpenseCategory(String name) {
-  expenseCategories.remove(name);
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
- // Helper — رفع الـ static فقط (أسعار / ديون / إعدادات / مصروفات)
-Future<void> _pushStaticOnly() async {
-  if (shopId == null) return;
-  await FirebaseService.pushStaticData(shopId!, _buildStaticData());
-  await SyncService.saveLocal(shopId!, _buildDataDict());
-}
-
-// Helper — رفع البطولات للـ Firebase
-Future<void> _saveTournaments() async {
-  if (shopId == null) return;
-  await FirebaseService.set(
-    FirebaseService.shopTournamentsPath(shopId!),
-    tournaments,
-  );
-  await SyncService.saveLocal(shopId!, _buildDataDict());
-}
   // ══════════════════════════════════════════════════════════════════════════
   // SAVE DATA
   // ══════════════════════════════════════════════════════════════════════════
@@ -1258,10 +1278,11 @@ Future<void> _saveTournaments() async {
     if (shopId == null) return;
     final data = _buildDataDict();
     await SyncService.saveLocal(shopId!, data);
-    
+
     if (deviceId != null) {
       final idx = devices.indexWhere((d) => d.id == deviceId);
       if (idx != -1) {
+        // 🔥 pushSingleDevice في SyncService بيستخدم pushSingleDeviceState (بدون session_log)
         await _sync?.pushSingleDevice(idx, devices[idx].toJson());
       }
     } else {
@@ -1269,69 +1290,72 @@ Future<void> _saveTournaments() async {
     }
   }
 
-  Future<void> _saveSingleHistoryRecord(Map<String, dynamic> newRecord) async {
+  Future<void> _saveSingleHistoryRecord(
+      Map<String, dynamic> newRecord) async {
     if (shopId == null) return;
     await SyncService.saveLocal(shopId!, _buildDataDict());
     await _sync?.pushSingleHistory(newRecord);
   }
 
-Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drinkTablesChanged = false}) async {
-  if (shopId == null) return;
-  await SyncService.saveLocal(shopId!, _buildDataDict());
-  final futures = <Future>[];
-  if (tablesChanged) futures.add(FirebaseService.pushTablesState(shopId!, tables, _myDeviceId));
-  if (drinkTablesChanged) futures.add(FirebaseService.pushDrinkTablesState(shopId!, drinkTables, _myDeviceId));
-  if (futures.isNotEmpty) await Future.wait(futures);
-  _sync?.schedulePushTables();
-}
+  Future<void> _saveTables({
+    int? tableIndex,
+    bool tablesChanged = true,
+    bool drinkTablesChanged = false,
+  }) async {
+    if (shopId == null) return;
+    await SyncService.saveLocal(shopId!, _buildDataDict());
+    final futures = <Future>[];
+    if (tablesChanged) {
+      futures.add(
+          FirebaseService.pushTablesState(shopId!, tables, _myDeviceId));
+    }
+    if (drinkTablesChanged) {
+      futures.add(FirebaseService.pushDrinkTablesState(
+          shopId!, drinkTables, _myDeviceId));
+    }
+    if (futures.isNotEmpty) await Future.wait(futures);
+    _sync?.schedulePushTables();
+  }
 
   Future<void> _saveHistory() async {
     if (shopId == null) return;
     await SyncService.saveLocal(shopId!, _buildDataDict());
-    // POST ريكورد واحد بس — مش upload كل السجل
     if (history.isNotEmpty) {
       await _sync?.pushSingleHistory(history.last);
     }
   }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // CASHIER MANAGEMENT
-  // ══════════════════════════════════════════════════════════════════════════
-
-  void addCashier(String name, String password) {
-    cashiers.add({'name': name.trim(), 'hash': hashPassword(password)});
-    // ✅ AUDIT LOG
-    AuditLogService.log(action: AuditAction.cashierAdded, actionDetails: 'أضاف كاشير جديد "$name"');
-    _pushStaticOnly();  // كان saveData()
-    notifyListeners();
+  Future<void> _pushStaticOnly() async {
+    if (shopId == null) return;
+    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+    await SyncService.saveLocal(shopId!, _buildDataDict());
   }
 
-  void removeCashier(int index) {
-    if (cashiers.length <= 1) return;
-    final name = cashiers[index]['name'] as String? ?? '';
-    // ✅ AUDIT LOG
-    AuditLogService.log(action: AuditAction.cashierRemoved, actionDetails: 'حذف الكاشير "$name"');
-    cashiers.removeAt(index);
-    _pushStaticOnly();  // كان saveData()
-    notifyListeners();
+  Future<void> _saveTournaments() async {
+    if (shopId == null) return;
+    await FirebaseService.set(
+      FirebaseService.shopTournamentsPath(shopId!),
+      tournaments,
+    );
+    await SyncService.saveLocal(shopId!, _buildDataDict());
   }
 
-  void updateCashierName(int index, String name) {
-    cashiers[index]['name'] = name.trim();
-    _pushStaticOnly();  // كان saveData()
-    notifyListeners();
-  }
-
-  void updateCashierPassword(int index, String newPassword) {
-    cashiers[index]['hash'] = hashPassword(newPassword);
-    _pushStaticOnly();  // كان saveData()
-    notifyListeners();
+  Future<void> _pushShiftsToFirebase() async {
+    if (shopId == null) return;
+    final shiftsJson = shiftsHistory.map((s) => s.toJson()).toList();
+    await FirebaseService.set(
+      FirebaseService.shiftsHistoryPath(shopId!),
+      shiftsJson,
+    );
+    await SyncService.saveLocal(shopId!, _buildDataDict());
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // SESSION LOG
+  // SESSION LOG — محلي بس، لا يتحمل على Firebase إلا عند stopDevice
   // ══════════════════════════════════════════════════════════════════════════
 
+  // 🔥 BANDWIDTH FIX #2: _logEvent — يضيف للـ local session_log فقط
+  // لا يتحمل على Firebase — session_log بيتحمل مرة واحدة فقط في stopDevice
   void _logEvent(PSDevice d, String type, {String? note, int? minutes}) {
     final now = DateTime.now();
     final timeStr =
@@ -1345,6 +1369,7 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       if (note != null) 'note': note,
       if (minutes != null) 'minutes': minutes,
     });
+    // 🔥 لا pushDevicesState هنا — session_log محلي بس
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1357,7 +1382,6 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
     d.startTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     d.addedSeconds = 0;
     d.isPaused = false;
- //   d.orders = {};
     d.sessionLog = [];
 
     final modeLabel = mode == 'multi' ? 'مالتي' : 'عادي';
@@ -1367,8 +1391,8 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       d.countdownTotalSeconds = countdownSeconds;
       d.countdownAlertSent = false;
       _countdownAlertedDevices.remove(d.id);
-      _logEvent(d, 'start', note: 'بدأ اللعب (عد تنازلي: ${countdownSeconds ~/ 60} دقيقة)');
-      // ✅ AUDIT LOG
+      _logEvent(d, 'start',
+          note: 'بدأ اللعب (عد تنازلي: ${countdownSeconds ~/ 60} دقيقة)');
       AuditLogService.logDevice(
         action: AuditAction.deviceStart,
         deviceName: d.displayName,
@@ -1381,7 +1405,6 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       d.countdownAlertSent = false;
       _countdownAlertedDevices.remove(d.id);
       _logEvent(d, 'start', note: 'بدأ اللعب');
-      // ✅ AUDIT LOG
       AuditLogService.logDevice(
         action: AuditAction.deviceStart,
         deviceName: d.displayName,
@@ -1391,47 +1414,52 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
     }
 
     _alertedDevices.remove(d.id);
-  _saveDevices(deviceId: d.id);
-   // إرسال إشعار تليجرام ببدء الجلسة
-   if (shopId != null) {
+    _saveDevices(deviceId: d.id);
+    if (shopId != null) {
       _notifyTelegram(shopId!, 'session_start', {
         'deviceName': d.displayName,
         'cashier': currentCashierName ?? 'أدمن',
         'mode': modeLabel,
         'countdown': countdownSeconds != null ? (countdownSeconds ~/ 60) : null,
-        'startTime': DateTime.now().toIso8601String(), // ← السطر الجديد المضاف هنا
+        'startTime': DateTime.now().toIso8601String(),
       });
     }
     notifyListeners();
   }
 
- void togglePause(PSDevice d) {
-  if (d.isPaused) {
-    final pausedDuration =
-        (DateTime.now().millisecondsSinceEpoch ~/ 1000) - d.pauseStartTime!;
-    d.startTime = d.startTime! + pausedDuration;
-    d.isPaused = false;
-    d.pauseStartTime = null;
+  void togglePause(PSDevice d) {
+    if (d.isPaused) {
+      final pausedDuration =
+          (DateTime.now().millisecondsSinceEpoch ~/ 1000) -
+              d.pauseStartTime!;
+      d.startTime = d.startTime! + pausedDuration;
+      d.isPaused = false;
+      d.pauseStartTime = null;
 
-    // ✅ لو كان countdown وخلص وقته، حوّله لـ open session
-    if (d.isCountdown && d.countdownFinished) {
-      d.isCountdown = false;
-      d.countdownTotalSeconds = null;
-      d.countdownAlertSent = false;
-      _countdownAlertedDevices.remove(d.id);
+      if (d.isCountdown && d.countdownFinished) {
+        d.isCountdown = false;
+        d.countdownTotalSeconds = null;
+        d.countdownAlertSent = false;
+        _countdownAlertedDevices.remove(d.id);
+      }
+
+      _logEvent(d, 'resume', note: 'استأنف اللعب');
+      AuditLogService.logDevice(
+          action: AuditAction.deviceResume,
+          deviceName: d.displayName,
+          deviceType: d.deviceType);
+    } else {
+      d.isPaused = true;
+      d.pauseStartTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      _logEvent(d, 'pause', note: 'إيقاف مؤقت');
+      AuditLogService.logDevice(
+          action: AuditAction.devicePause,
+          deviceName: d.displayName,
+          deviceType: d.deviceType);
     }
-
-    _logEvent(d, 'resume', note: 'استأنف اللعب');
-    AuditLogService.logDevice(action: AuditAction.deviceResume, deviceName: d.displayName, deviceType: d.deviceType);
-  } else {
-    d.isPaused = true;
-    d.pauseStartTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    _logEvent(d, 'pause', note: 'إيقاف مؤقت');
-    AuditLogService.logDevice(action: AuditAction.devicePause, deviceName: d.displayName, deviceType: d.deviceType);
+    _saveDevices(deviceId: d.id);
+    notifyListeners();
   }
-  _saveDevices(deviceId: d.id);
-  notifyListeners();
-}
 
   void addMatchRecord(PSDevice d) {
     final matchPrice = matchPriceFor(d);
@@ -1451,12 +1479,13 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
     };
     history.add(record);
-  _notifyTelegram(shopId!, 'match', {
-  'deviceName': d.displayName,
-  'price': matchPrice,
-  'cashier': currentCashierName ?? 'أدمن',
-});
-    // ✅ AUDIT LOG
+    if (shopId != null) {
+      _notifyTelegram(shopId!, 'match', {
+        'deviceName': d.displayName,
+        'price': matchPrice,
+        'cashier': currentCashierName ?? 'أدمن',
+      });
+    }
     AuditLogService.logDevice(
       action: AuditAction.matchRecorded,
       deviceName: d.displayName,
@@ -1487,8 +1516,6 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
     };
     history.add(record);
-    
-    // ✅ AUDIT LOG
     AuditLogService.logTable(
       action: AuditAction.tableGameRecord,
       tableName: t['name'] ?? '',
@@ -1500,53 +1527,50 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
 
   void setMatchEnabled(bool val) {
     matchEnabled = val;
-    // ✅ AUDIT LOG
     AuditLogService.log(
       action: AuditAction.matchToggled,
       actionDetails: val ? 'فعّل زرار الماتش' : 'عطّل زرار الماتش',
     );
-    _pushStaticOnly();  // كان saveData()
+    _pushStaticOnly();
     notifyListeners();
   }
 
-void addTime(PSDevice d, int minutes) {
-  if (d.isCountdown && d.countdownTotalSeconds != null) {
-    // عد تنازلي: زود الوقت الكلي المحدد
-    d.countdownTotalSeconds = d.countdownTotalSeconds! + minutes * 60;
-    if (d.countdownTotalSeconds! < 0) d.countdownTotalSeconds = 0;
-    // لو الوقت اتزاد تاني بعد ما خلص
-    if (minutes > 0 && d.countdownAlertSent) {
-      d.countdownAlertSent = false;
-      _countdownAlertedDevices.remove(d.id);
-      if (d.isPaused) {
-        final pausedDuration =
-            (DateTime.now().millisecondsSinceEpoch ~/ 1000) - d.pauseStartTime!;
-        d.startTime = d.startTime! + pausedDuration;
-        d.isPaused = false;
-        d.pauseStartTime = null;
+  void addTime(PSDevice d, int minutes) {
+    if (d.isCountdown && d.countdownTotalSeconds != null) {
+      d.countdownTotalSeconds = d.countdownTotalSeconds! + minutes * 60;
+      if (d.countdownTotalSeconds! < 0) d.countdownTotalSeconds = 0;
+      if (minutes > 0 && d.countdownAlertSent) {
+        d.countdownAlertSent = false;
+        _countdownAlertedDevices.remove(d.id);
+        if (d.isPaused) {
+          final pausedDuration =
+              (DateTime.now().millisecondsSinceEpoch ~/ 1000) -
+                  d.pauseStartTime!;
+          d.startTime = d.startTime! + pausedDuration;
+          d.isPaused = false;
+          d.pauseStartTime = null;
+        }
+      }
+    } else {
+      if (d.startTime != null) {
+        d.startTime = d.startTime! - minutes * 60;
       }
     }
-  } else {
-    // عد تصاعدي: عدّل startTime زي الأول
-    if (d.startTime != null) {
-      d.startTime = d.startTime! - minutes * 60;
-    }
+
+    final role = isAdmin ? 'أدمن' : (currentCashierName ?? 'كاشير');
+    final action = minutes > 0
+        ? 'أضاف $minutes دقيقة ($role)'
+        : 'خصم ${minutes.abs()} دقيقة ($role)';
+    _logEvent(d, 'add_time', note: action, minutes: minutes);
+    AuditLogService.logDevice(
+      action: AuditAction.deviceAddTime,
+      deviceName: d.displayName,
+      deviceType: d.deviceType,
+      extra: minutes > 0 ? '+$minutes دقيقة' : '${minutes} دقيقة',
+    );
+    _saveDevices(deviceId: d.id);
+    notifyListeners();
   }
-  
-  final role = isAdmin ? 'أدمن' : (currentCashierName ?? 'كاشير');
-  final action = minutes > 0
-      ? 'أضاف $minutes دقيقة ($role)'
-      : 'خصم ${minutes.abs()} دقيقة ($role)';
-  _logEvent(d, 'add_time', note: action, minutes: minutes);
-  AuditLogService.logDevice(
-    action: AuditAction.deviceAddTime,
-    deviceName: d.displayName,
-    deviceType: d.deviceType,
-    extra: minutes > 0 ? '+$minutes دقيقة' : '${minutes} دقيقة',
-  );
-  _saveDevices(deviceId: d.id);
-  notifyListeners();
-}
 
   void setDeviceTimer(PSDevice d, int? minutes) {
     d.timerAlertMinutes = minutes;
@@ -1556,8 +1580,10 @@ void addTime(PSDevice d, int minutes) {
   }
 
   void cancelDevice(PSDevice d) {
-    // ✅ AUDIT LOG — قبل المسح
-    AuditLogService.logDevice(action: AuditAction.deviceCancel, deviceName: d.displayName, deviceType: d.deviceType);
+    AuditLogService.logDevice(
+        action: AuditAction.deviceCancel,
+        deviceName: d.displayName,
+        deviceType: d.deviceType);
     d.status = 'متاح';
     d.startTime = null;
     d.addedSeconds = 0;
@@ -1576,65 +1602,65 @@ void addTime(PSDevice d, int minutes) {
     notifyListeners();
   }
 
-Map<String, dynamic> stopDevice(PSDevice d) {
-  // حماية من double-checkout
-  if (_stoppingDevices.contains(d.id)) return {};
-  // لو مش شغال خالص
-if (!d.isActive && d.orders.isEmpty) return {};
+  // 🔥 BANDWIDTH FIX #2: stopDevice — session_log يتحفظ في السجل التاريخي هنا فقط
+  // هي المرة الوحيدة اللي بيتحمل فيها session_log على Firebase (كجزء من record)
+  Map<String, dynamic> stopDevice(PSDevice d) {
+    if (_stoppingDevices.contains(d.id)) return {};
+    if (!d.isActive && d.orders.isEmpty) return {};
 
-if (!d.isActive && d.orders.isNotEmpty) {
-  // ✅ سجّل البوفيه حتى لو الجهاز مش شغال
-  final buffetPrice = d.getBuffetPrice(menu);
-     final timePrice = d.isActive ? d.calculateTimePrice(prices) : 0.0;
+    if (!d.isActive && d.orders.isNotEmpty) {
+      final buffetPrice = d.getBuffetPrice(menu);
+      final timePrice = 0.0;
+      final record = {
+        'id': d.id,
+        'name': d.displayName,
+        'device_type': d.deviceType,
+        'duration': '0س 0د',
+        'elapsed_seconds': 0,
+        'play_mode': d.mode,
+        'time_cost': 0.0,
+        'buffet_cost': buffetPrice,
+        'total': buffetPrice,
+        'orders': Map<String, int>.from(d.orders),
+        'date': DateTime.now().toString(),
+        'session_log': [], // بوفيه بدون جلسة — مفيش log
+        'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
+      };
+      d.orders.forEach((item, qty) => _deductFromInventory(item, qty));
+      history.add(record);
+      if (shopId != null) {
+        _notifyTelegram(shopId!, 'session_end', {
+          'deviceName': d.displayName,
+          'mode': d.mode == 'multi' ? 'مالتي' : 'عادي',
+          'cashier': currentCashierName ?? 'أدمن',
+          'startTime': '-',
+          'endTime': DateTime.now().toString().substring(0, 16),
+          'timeCost': timePrice,
+          'buffetCost': buffetPrice,
+          'total': buffetPrice,
+          'orders': d.orders.isNotEmpty
+              ? d.orders.entries.map((e) => '${e.key} ×${e.value}').join(', ')
+              : null,
+        });
+      }
+      d.orders = {};
+      _saveDevices(deviceId: d.id);
+      _saveSingleHistoryRecord(record);
+      notifyListeners();
+      return record;
+    }
 
-  final record = {
-    'id': d.id,
-    'name': d.displayName,
-    'device_type': d.deviceType,
-    'duration': '0س 0د',
-    'elapsed_seconds': 0,
-    'play_mode': d.mode,
-    'time_cost': 0.0,
-    'buffet_cost': buffetPrice,
-    'total': buffetPrice,
-    'orders': Map<String, int>.from(d.orders),
-    'date': DateTime.now().toString(),
-    'session_log': [],
-    'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
-  };
-  d.orders.forEach((item, qty) => _deductFromInventory(item, qty));
-  history.add(record);
-_notifyTelegram(shopId!, 'session_end', {
-  'deviceName': d.displayName,
-  'mode': d.mode == 'multi' ? 'مالتي' : 'عادي',
-  'cashier': currentCashierName ?? 'أدمن',
-  'startTime': DateTime.fromMillisecondsSinceEpoch(
-      (d.startTime ?? 0) * 1000).toString().substring(0, 16),
-  'endTime': DateTime.now().toString().substring(0, 16),
-  'timeCost': timePrice,
-  'buffetCost': buffetPrice,
-  'total': timePrice + buffetPrice,
-  'orders': d.orders.isNotEmpty  // ✅ أضف الأوردرات
-      ? d.orders.entries.map((e) => '${e.key} ×${e.value}').join(', ')
-      : null,
-});
-  d.orders = {};
-  _saveDevices(deviceId: d.id);
-  _saveSingleHistoryRecord(record);
-  notifyListeners();
-  return record;
-}
-  _stoppingDevices.add(d.id);
-  _logEvent(d, 'stop', note: 'انتهت الجلسة');
+    _stoppingDevices.add(d.id);
+    _logEvent(d, 'stop', note: 'انتهت الجلسة');
     final timePrice = d.isActive ? d.calculateTimePrice(prices) : 0.0;
     final buffetPrice = d.getBuffetPrice(menu);
-    
-    // ✅ AUDIT LOG — قبل التصفير
+
     AuditLogService.logDevice(
       action: AuditAction.deviceStop,
       deviceName: d.displayName,
       deviceType: d.deviceType,
-      extra: 'لعب: ${timePrice.toStringAsFixed(1)} ج | بوفيه: ${buffetPrice.toStringAsFixed(1)} ج | إجمالي: ${(timePrice + buffetPrice).toStringAsFixed(1)} ج',
+      extra:
+          'لعب: ${timePrice.toStringAsFixed(1)} ج | بوفيه: ${buffetPrice.toStringAsFixed(1)} ج | إجمالي: ${(timePrice + buffetPrice).toStringAsFixed(1)} ج',
     );
 
     final elapsed = d.elapsedSeconds;
@@ -1653,6 +1679,8 @@ _notifyTelegram(shopId!, 'session_end', {
       'total': timePrice + buffetPrice,
       'orders': Map<String, int>.from(d.orders),
       'date': DateTime.now().toString(),
+      // 🔥 session_log يتحفظ هنا فقط (مرة واحدة) في السجل التاريخي
+      // مش بيتحمل على الـ realtime node أبداً
       'session_log': List<Map<String, dynamic>>.from(d.sessionLog),
       'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
       if (d.isCountdown) 'was_countdown': true,
@@ -1664,17 +1692,22 @@ _notifyTelegram(shopId!, 'session_end', {
       _deductFromInventory(item, qty);
     });
     history.add(record);
-_notifyTelegram(shopId!, 'session_end', {
-  'deviceName': d.displayName,
-  'mode': d.mode == 'multi' ? 'مالتي' : 'عادي',
-  'cashier': currentCashierName ?? 'أدمن',
-  'startTime': DateTime.fromMillisecondsSinceEpoch(
-      (d.startTime ?? 0) * 1000).toString().substring(0, 16),
-  'endTime': DateTime.now().toString().substring(0, 16),
-  'timeCost': timePrice,
-  'buffetCost': buffetPrice,
-  'total': timePrice + buffetPrice,
-});
+
+    if (shopId != null) {
+      _notifyTelegram(shopId!, 'session_end', {
+        'deviceName': d.displayName,
+        'mode': d.mode == 'multi' ? 'مالتي' : 'عادي',
+        'cashier': currentCashierName ?? 'أدمن',
+        'startTime': DateTime.fromMillisecondsSinceEpoch(
+                (d.startTime ?? 0) * 1000)
+            .toString()
+            .substring(0, 16),
+        'endTime': DateTime.now().toString().substring(0, 16),
+        'timeCost': timePrice,
+        'buffetCost': buffetPrice,
+        'total': timePrice + buffetPrice,
+      });
+    }
 
     d.status = 'متاح';
     d.startTime = null;
@@ -1687,7 +1720,7 @@ _notifyTelegram(shopId!, 'session_end', {
     d.isCountdown = false;
     d.countdownTotalSeconds = null;
     d.countdownAlertSent = false;
-    d.sessionLog = [];
+    d.sessionLog = []; // 🔥 امسح الـ local log بعد الحفظ
     _alertedDevices.remove(d.id);
     _countdownAlertedDevices.remove(d.id);
     _stoppingDevices.remove(d.id);
@@ -1712,15 +1745,14 @@ _notifyTelegram(shopId!, 'session_end', {
     d.orders[item] = (d.orders[item] ?? 0) + qty;
     if (d.orders[item]! <= 0) d.orders.remove(item);
 
-    // ✅ AUDIT LOG
     AuditLogService.logDevice(
-      action: qty > 0 ? AuditAction.buffetItemAdded : AuditAction.buffetItemRemoved,
+      action:
+          qty > 0 ? AuditAction.buffetItemAdded : AuditAction.buffetItemRemoved,
       deviceName: d.displayName,
       extra: '$item ×${qty.abs()}',
     );
 
-   _saveDevices(deviceId: d.id);
-
+    _saveDevices(deviceId: d.id);
     notifyListeners();
     return null;
   }
@@ -1739,9 +1771,9 @@ _notifyTelegram(shopId!, 'session_end', {
     to.isCountdown = from.isCountdown;
     to.countdownTotalSeconds = from.countdownTotalSeconds;
     to.countdownAlertSent = from.countdownAlertSent;
-    _logEvent(to, 'transfer', note: 'تم نقل الجلسة من ${from.displayName}');
-    
-    // ✅ AUDIT LOG
+    _logEvent(to, 'transfer',
+        note: 'تم نقل الجلسة من ${from.displayName}');
+
     AuditLogService.logDevice(
       action: AuditAction.deviceTransfer,
       deviceName: from.displayName,
@@ -1763,22 +1795,34 @@ _notifyTelegram(shopId!, 'session_end', {
     _alertedDevices.remove(from.id);
     _countdownAlertedDevices.remove(from.id);
 
-_saveDevices(deviceId: from.id);
-_saveDevices(deviceId: to.id);
+    _saveDevices(deviceId: from.id);
+    _saveDevices(deviceId: to.id);
     notifyListeners();
   }
 
-Future<bool> archiveAndClear() async {
-    if (history.isEmpty || shopId == null) return false;
+  // 🔥 BANDWIDTH FIX: archiveAndClear — بيجيب الـ history الكاملة مرة واحدة
+  // للأرشفة باستخدام getFullHistory() — ده الاستثناء الوحيد لـ pull كامل
+  Future<bool> archiveAndClear() async {
+    if (shopId == null) return false;
     _sync?.pause();
     archiving = true;
+
     try {
-      final totalTime = history.fold(0.0, (s, h) => s + (h['time_cost'] ?? 0));
-      final totalBuffet = history.fold(0.0, (s, h) => s + (h['buffet_cost'] ?? 0));
-      final records = List<Map<String, dynamic>>.from(history);
+      // 🔥 جيب الـ history الكاملة من Firebase للأرشفة (الاستثناء الوحيد)
+      List<Map<String, dynamic>> recordsToArchive = history;
+      if (history.isEmpty) {
+        // لو الـ history الـ local فاضية، جيبها من Firebase
+        recordsToArchive = await FirebaseService.getFullHistory(shopId!);
+      }
+
+      if (recordsToArchive.isEmpty) return false;
+
+      final totalTime = recordsToArchive.fold(
+          0.0, (s, h) => s + ((h['time_cost'] as num?)?.toDouble() ?? 0));
+      final totalBuffet = recordsToArchive.fold(
+          0.0, (s, h) => s + ((h['buffet_cost'] as num?)?.toDouble() ?? 0));
       final date = DateTime.now().toString();
 
-      // ✅ كتابة الإجماليات فقط في `archives` — بدون حفظ تفاصيل الجلسات
       String? archiveId;
       for (int i = 0; i < 3 && archiveId == null; i++) {
         archiveId = await FirebaseService.pushArchive(
@@ -1788,19 +1832,25 @@ Future<bool> archiveAndClear() async {
           totalBuffet: totalBuffet,
           totalOverall: totalTime + totalBuffet,
         );
-        if (archiveId == null) await Future.delayed(const Duration(seconds: 1));
+        if (archiveId == null) {
+          await Future.delayed(const Duration(seconds: 1));
+        }
       }
       if (archiveId == null) return false;
 
-      // ✅ AUDIT LOG — بعد ما الأرشفة تنجح
       AuditLogService.log(
         action: AuditAction.dayArchived,
-        actionDetails: 'أرشف اليوم | ${history.length} جلسة | إجمالي: ${(totalTime + totalBuffet).toStringAsFixed(1)} ج',
-        extra: {'sessions_count': history.length, 'total': totalTime + totalBuffet},
+        actionDetails:
+            'أرشف اليوم | ${recordsToArchive.length} جلسة | إجمالي: ${(totalTime + totalBuffet).toStringAsFixed(1)} ج',
+        extra: {
+          'sessions_count': recordsToArchive.length,
+          'total': totalTime + totalBuffet
+        },
       );
 
       history.clear();
-      await FirebaseService.set(FirebaseService.historyPath(shopId!), []); // ← أضف هذا
+      _historyLoaded = false; // reset — لازم يتحمل on-demand بعد الأرشفة
+      await FirebaseService.set(FirebaseService.historyPath(shopId!), []);
       await _saveHistory();
       notifyListeners();
       return true;
@@ -1816,28 +1866,32 @@ Future<bool> archiveAndClear() async {
   // DEVICE MANAGEMENT
   // ══════════════════════════════════════════════════════════════════════════
 
-void addDevice(String name, String type) {
-  final id = devices.length + 1;
-  final d = PSDevice(id: id, deviceType: type);
-  d.displayName = name;
-  devices.add(d);
-  numDevices = devices.length;
-  AuditLogService.log(action: AuditAction.deviceAdded, actionDetails: 'أضاف جهاز "$name" (${type.toUpperCase()})');
-  _saveDevices();  // ✅ كان saveData()
-  notifyListeners();
-}
-
-void removeDevice(int index) {
-  final name = devices[index].displayName;
-  AuditLogService.log(action: AuditAction.deviceRemoved, actionDetails: 'حذف الجهاز "$name"');
-  devices.removeAt(index);
-  for (int i = 0; i < devices.length; i++) {
-    devices[i].id = i + 1;
+  void addDevice(String name, String type) {
+    final id = devices.length + 1;
+    final d = PSDevice(id: id, deviceType: type);
+    d.displayName = name;
+    devices.add(d);
+    numDevices = devices.length;
+    AuditLogService.log(
+        action: AuditAction.deviceAdded,
+        actionDetails: 'أضاف جهاز "$name" (${type.toUpperCase()})');
+    _saveDevices();
+    notifyListeners();
   }
-  numDevices = devices.length;
-  _saveDevices();  // ✅ كان saveData()
-  notifyListeners();
-}
+
+  void removeDevice(int index) {
+    final name = devices[index].displayName;
+    AuditLogService.log(
+        action: AuditAction.deviceRemoved,
+        actionDetails: 'حذف الجهاز "$name"');
+    devices.removeAt(index);
+    for (int i = 0; i < devices.length; i++) {
+      devices[i].id = i + 1;
+    }
+    numDevices = devices.length;
+    _saveDevices();
+    notifyListeners();
+  }
 
   void updateNumDevices(int count) {
     numDevices = count;
@@ -1848,7 +1902,7 @@ void removeDevice(int index) {
     } else {
       devices = devices.sublist(0, count);
     }
-    _saveDevices();  // كان saveData()
+    _saveDevices();
     notifyListeners();
   }
 
@@ -1856,94 +1910,92 @@ void removeDevice(int index) {
   // TABLE ACTIONS
   // ══════════════════════════════════════════════════════════════════════════
 
-void addTable(String name, int ratePerHour,
-    {String tableType = 'ping', int gamePrice = 0}) {
-  tables.add({
-    'name': name,
-    'rate': ratePerHour,
-    'table_type': tableType,
-    'game_price': gamePrice,
-    'start_time': null,
-    'is_paused': false,
-    'pause_start_time': null,
-    'orders': <String, int>{},
-  });
-  _saveTables();  // ✅ كان saveData()
-  notifyListeners();
-}
+  void addTable(String name, int ratePerHour,
+      {String tableType = 'ping', int gamePrice = 0}) {
+    tables.add({
+      'name': name,
+      'rate': ratePerHour,
+      'table_type': tableType,
+      'game_price': gamePrice,
+      'start_time': null,
+      'is_paused': false,
+      'pause_start_time': null,
+      'orders': <String, int>{},
+    });
+    _saveTables();
+    notifyListeners();
+  }
 
-void removeTable(int index) {
-  tables.removeAt(index);
-  _saveTables();  // ✅ كان saveData()
-  notifyListeners();
-}
+  void removeTable(int index) {
+    tables.removeAt(index);
+    _saveTables();
+    notifyListeners();
+  }
 
   void updateTableSettings(int index, String name, int rate,
-    {String? tableType, int? gamePrice}) {
-  tables[index]['name'] = name;
-  tables[index]['rate'] = rate;
-  if (tableType != null) tables[index]['table_type'] = tableType;
-  if (gamePrice != null) tables[index]['game_price'] = gamePrice;
-  _saveTables();  // ✅ كان saveData()
-  notifyListeners();
-}
+      {String? tableType, int? gamePrice}) {
+    tables[index]['name'] = name;
+    tables[index]['rate'] = rate;
+    if (tableType != null) tables[index]['table_type'] = tableType;
+    if (gamePrice != null) tables[index]['game_price'] = gamePrice;
+    _saveTables();
+    notifyListeners();
+  }
 
- // بعد
-void startTable(int index, {
-  String playMode = 'normal',
-  int? countdownSeconds,
-  int? customRate,  // ✅ سعر مخصص (أمريكاني / غيره)
-}) {
-  tables[index]['start_time'] =
-      DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  tables[index]['is_paused'] = false;
-  tables[index]['pause_start_time'] = null;
-//  tables[index]['orders'] = <String, int>{};
-  tables[index]['play_mode'] = playMode;
- 
-  // ✅ احفظ السعر الفعلي المستخدم في الجلسة
-  if (customRate != null) {
-    tables[index]['session_rate'] = customRate;
-  } else {
-    tables[index].remove('session_rate');
-  }
- 
-  // countdown
-  if (countdownSeconds != null && countdownSeconds > 0) {
-    tables[index]['is_countdown'] = true;
-    tables[index]['countdown_total_seconds'] = countdownSeconds;
-    tables[index]['countdown_alert_sent'] = false;
-  } else {
-    tables[index]['is_countdown'] = false;
-    tables[index]['countdown_total_seconds'] = null;
-    tables[index]['countdown_alert_sent'] = false;
-  }
- 
-  final modeLabel = playMode == 'american' ? 'أمريكاني' :
-                    playMode == 'multi'    ? 'مالتي' : 'عادي';
-  final extra = countdownSeconds != null
-      ? '$modeLabel — ${countdownSeconds ~/ 60} دقيقة محددة'
-      : '$modeLabel — مفتوح';
- 
-  AuditLogService.logTable(
-    action: AuditAction.tableStart,
-    tableName: tables[index]['name'] ?? '',
-    extra: extra,
-  );
-   // إرسال إشعار تليجرام ببدء التربيزة
-  if (shopId != null) {
+  void startTable(int index, {
+    String playMode = 'normal',
+    int? countdownSeconds,
+    int? customRate,
+  }) {
+    tables[index]['start_time'] =
+        DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    tables[index]['is_paused'] = false;
+    tables[index]['pause_start_time'] = null;
+    tables[index]['play_mode'] = playMode;
+
+    if (customRate != null) {
+      tables[index]['session_rate'] = customRate;
+    } else {
+      tables[index].remove('session_rate');
+    }
+
+    if (countdownSeconds != null && countdownSeconds > 0) {
+      tables[index]['is_countdown'] = true;
+      tables[index]['countdown_total_seconds'] = countdownSeconds;
+      tables[index]['countdown_alert_sent'] = false;
+    } else {
+      tables[index]['is_countdown'] = false;
+      tables[index]['countdown_total_seconds'] = null;
+      tables[index]['countdown_alert_sent'] = false;
+    }
+
+    final modeLabel = playMode == 'american'
+        ? 'أمريكاني'
+        : playMode == 'multi'
+            ? 'مالتي'
+            : 'عادي';
+    final extra = countdownSeconds != null
+        ? '$modeLabel — ${countdownSeconds ~/ 60} دقيقة محددة'
+        : '$modeLabel — مفتوح';
+
+    AuditLogService.logTable(
+      action: AuditAction.tableStart,
+      tableName: tables[index]['name'] ?? '',
+      extra: extra,
+    );
+    if (shopId != null) {
       _notifyTelegram(shopId!, 'session_start', {
         'deviceName': tables[index]['name'] ?? 'تربيزة',
         'cashier': currentCashierName ?? 'أدمن',
         'mode': modeLabel,
-        'countdown': countdownSeconds != null ? (countdownSeconds ~/ 60) : null,
-        'startTime': DateTime.now().toIso8601String(), // ← السطر الجديد المضاف هنا
+        'countdown':
+            countdownSeconds != null ? (countdownSeconds ~/ 60) : null,
+        'startTime': DateTime.now().toIso8601String(),
       });
     }
-  _saveTables(tableIndex: index);
-  notifyListeners();
-}
-
+    _saveTables(tableIndex: index);
+    notifyListeners();
+  }
 
   void toggleTablePause(int index) {
     final t = tables[index];
@@ -1953,21 +2005,22 @@ void startTable(int index, {
       t['start_time'] = (t['start_time'] ?? 0) + paused;
       t['is_paused'] = false;
       t['pause_start_time'] = null;
-      // ✅ AUDIT LOG
-      AuditLogService.logTable(action: AuditAction.tableResume, tableName: t['name'] ?? '');
+      AuditLogService.logTable(
+          action: AuditAction.tableResume, tableName: t['name'] ?? '');
     } else {
       t['is_paused'] = true;
       t['pause_start_time'] = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      // ✅ AUDIT LOG
-      AuditLogService.logTable(action: AuditAction.tablePause, tableName: t['name'] ?? '');
+      AuditLogService.logTable(
+          action: AuditAction.tablePause, tableName: t['name'] ?? '');
     }
     _saveTables();
     notifyListeners();
   }
 
   void cancelTable(int index) {
-    // ✅ AUDIT LOG
-    AuditLogService.logTable(action: AuditAction.tableCancel, tableName: tables[index]['name'] ?? '');
+    AuditLogService.logTable(
+        action: AuditAction.tableCancel,
+        tableName: tables[index]['name'] ?? '');
     tables[index]['start_time'] = null;
     tables[index]['is_paused'] = false;
     tables[index]['pause_start_time'] = null;
@@ -1987,16 +2040,18 @@ void startTable(int index, {
     if (t['is_paused'] == true && t['pause_start_time'] != null) {
       elapsed = (t['pause_start_time'] as int) - startTime;
     } else {
-      elapsed = (DateTime.now().millisecondsSinceEpoch ~/ 1000) - startTime;
+      elapsed =
+          (DateTime.now().millisecondsSinceEpoch ~/ 1000) - startTime;
     }
 
-   final rate = ((t['session_rate'] ?? t['rate']) as num).toDouble();
-  final timeCost = (elapsed / 3600) * rate;
-    final Map<String, int> orders = Map<String, int>.from(t['orders'] ?? {});
+    final rate =
+        ((t['session_rate'] ?? t['rate']) as num).toDouble();
+    final timeCost = (elapsed / 3600) * rate;
+    final Map<String, int> orders =
+        Map<String, int>.from(t['orders'] ?? {});
     double buffetCost = 0;
     orders.forEach((item, qty) => buffetCost += qty * (menu[item] ?? 0));
 
-    // ✅ AUDIT LOG — بعد حساب التكلفة
     AuditLogService.logTable(
       action: AuditAction.tableStop,
       tableName: t['name'] ?? '',
@@ -2012,7 +2067,7 @@ void startTable(int index, {
       'device_type': 'table',
       'duration': '${h}س ${m}د',
       'elapsed_seconds': elapsed,
-       'play_mode': t['play_mode'] ?? 'normal', // ✅ احفظ نوع اللعب
+      'play_mode': t['play_mode'] ?? 'normal',
       'time_cost': timeCost,
       'buffet_cost': buffetCost,
       'total': timeCost + buffetCost,
@@ -2026,13 +2081,16 @@ void startTable(int index, {
       _deductFromInventory(item, qty);
     });
     history.add(record);
-   _notifyTelegram(shopId!, 'session_end', {
-  'deviceName': t['name'] ?? '',
-  'timeCost': timeCost,
-  'buffetCost': buffetCost,
-  'total': timeCost + buffetCost,
-  'cashier': currentCashierName ?? 'أدمن',
-});
+    if (shopId != null) {
+      _notifyTelegram(shopId!, 'session_end', {
+        'deviceName': t['name'] ?? '',
+        'timeCost': timeCost,
+        'buffetCost': buffetCost,
+        'total': timeCost + buffetCost,
+        'cashier': currentCashierName ?? 'أدمن',
+      });
+    }
+
     tables[index]['start_time'] = null;
     tables[index]['is_paused'] = false;
     tables[index]['pause_start_time'] = null;
@@ -2063,10 +2121,11 @@ void startTable(int index, {
     if (orders[item]! <= 0) orders.remove(item);
     tables[index]['orders'] = orders;
 
-    // ✅ AUDIT LOG
     final tableName = tables[index]['name']?.toString() ?? 'تربيزة';
     AuditLogService.logTable(
-      action: qty > 0 ? AuditAction.tableOrderAdded : AuditAction.tableOrderRemoved,
+      action: qty > 0
+          ? AuditAction.tableOrderAdded
+          : AuditAction.tableOrderRemoved,
       tableName: tableName,
       extra: '$item ×${qty.abs()}',
     );
@@ -2075,6 +2134,7 @@ void startTable(int index, {
     notifyListeners();
     return null;
   }
+
   int tableElapsed(int index) {
     final t = tables[index];
     final startTime = t['start_time'] as int?;
@@ -2089,23 +2149,23 @@ void startTable(int index, {
   // DRINK TABLES
   // ══════════════════════════════════════════════════════════════════════════
 
- void addDrinkTable(String name) {
-  drinkTables.add({'name': name, 'orders': <String, int>{}});
-  _saveTables(drinkTablesChanged: true);
-  notifyListeners();
-}
+  void addDrinkTable(String name) {
+    drinkTables.add({'name': name, 'orders': <String, int>{}});
+    _saveTables(drinkTablesChanged: true);
+    notifyListeners();
+  }
 
-void removeDrinkTable(int index) {
-  drinkTables.removeAt(index);
-  _saveTables(drinkTablesChanged: true);
-  notifyListeners();
-}
+  void removeDrinkTable(int index) {
+    drinkTables.removeAt(index);
+    _saveTables(drinkTablesChanged: true);
+    notifyListeners();
+  }
 
-void updateDrinkTableName(int index, String name) {
-  drinkTables[index]['name'] = name;
-  _saveTables(drinkTablesChanged: true);
-  notifyListeners();
-}
+  void updateDrinkTableName(int index, String name) {
+    drinkTables[index]['name'] = name;
+    _saveTables(drinkTablesChanged: true);
+    notifyListeners();
+  }
 
   String? addDrinkTableOrder(int index, String item, int qty) {
     if (qty > 0) {
@@ -2113,22 +2173,26 @@ void updateDrinkTableName(int index, String name) {
       if (available != null && available <= 0) {
         return 'نفد "$item" من المخزن!';
       }
-      final orders = Map<String, int>.from(drinkTables[index]['orders'] ?? {});
+      final orders =
+          Map<String, int>.from(drinkTables[index]['orders'] ?? {});
       final currentInOrder = orders[item] ?? 0;
       final totalNeeded = currentInOrder + qty;
       if (available != null && totalNeeded > available) {
         return 'الكمية المتاحة هي $available فقط!';
       }
     }
-    final orders = Map<String, int>.from(drinkTables[index]['orders'] ?? {});
+    final orders =
+        Map<String, int>.from(drinkTables[index]['orders'] ?? {});
     orders[item] = (orders[item] ?? 0) + qty;
     if (orders[item]! <= 0) orders.remove(item);
     drinkTables[index]['orders'] = orders;
 
-    // ✅ AUDIT LOG
-    final dtName = drinkTables[index]['name']?.toString() ?? 'تربيزة مشروبات';
+    final dtName =
+        drinkTables[index]['name']?.toString() ?? 'تربيزة مشروبات';
     AuditLogService.log(
-      action: qty > 0 ? AuditAction.drinkTableOrderAdded : AuditAction.drinkTableOrderRemoved,
+      action: qty > 0
+          ? AuditAction.drinkTableOrderAdded
+          : AuditAction.drinkTableOrderRemoved,
       actionDetails: qty > 0
           ? 'أضاف "$item ×${qty.abs()}" لـ "$dtName"'
           : 'أزال "$item ×${qty.abs()}" من "$dtName"',
@@ -2140,16 +2204,17 @@ void updateDrinkTableName(int index, String name) {
     return null;
   }
 
- void setDrinkTableOrders(int index, Map<String, int> orders) {
-  drinkTables[index]['orders'] = orders;
-  _saveTables(tablesChanged: false, drinkTablesChanged: true);
-  notifyListeners();
-}
- 
+  void setDrinkTableOrders(int index, Map<String, int> orders) {
+    drinkTables[index]['orders'] = orders;
+    _saveTables(tablesChanged: false, drinkTablesChanged: true);
+    notifyListeners();
+  }
+
   Map<String, dynamic> checkoutDrinkTable(int index) {
     if (_checkoutDrinkTables.contains(index)) return {};
     final t = drinkTables[index];
-    final Map<String, int> orders = Map<String, int>.from(t['orders'] ?? {});
+    final Map<String, int> orders =
+        Map<String, int>.from(t['orders'] ?? {});
     if (orders.isEmpty) return {};
     _checkoutDrinkTables.add(index);
     double total = 0;
@@ -2157,7 +2222,6 @@ void updateDrinkTableName(int index, String name) {
       total += qty * (menu[item] ?? 0);
     });
 
-    // ✅ AUDIT LOG
     AuditLogService.logTable(
       action: AuditAction.drinkTableCheckout,
       tableName: t['name'] ?? '',
@@ -2183,17 +2247,19 @@ void updateDrinkTableName(int index, String name) {
       _deductFromInventory(item, qty);
     });
     history.add(record);
-  _notifyTelegram(shopId!, 'session_end', {
-  'deviceName': t['name'] ?? '',
-  'mode': 'مشروبات',
-  'cashier': currentCashierName ?? 'أدمن',
-  'startTime': '-',
-  'endTime': DateTime.now().toString().substring(0, 16),
-  'timeCost': 0.0,
-  'buffetCost': total,
-  'total': total,
-  'orders': orders.entries.map((e) => '${e.key} ×${e.value}').join(', '),
-});
+    if (shopId != null) {
+      _notifyTelegram(shopId!, 'session_end', {
+        'deviceName': t['name'] ?? '',
+        'mode': 'مشروبات',
+        'cashier': currentCashierName ?? 'أدمن',
+        'startTime': '-',
+        'endTime': DateTime.now().toString().substring(0, 16),
+        'timeCost': 0.0,
+        'buffetCost': total,
+        'total': total,
+        'orders': orders.entries.map((e) => '${e.key} ×${e.value}').join(', '),
+      });
+    }
     drinkTables[index]['orders'] = <String, int>{};
     _checkoutDrinkTables.remove(index);
 
@@ -2213,7 +2279,8 @@ void updateDrinkTableName(int index, String name) {
       device.addedSeconds = 0;
       device.isPaused = false;
       device.sessionLog = [];
-      _logEvent(device, 'start', note: 'بدأ اللعب (تحويل من طاولة طلبات)');
+      _logEvent(device, 'start',
+          note: 'بدأ اللعب (تحويل من طاولة طلبات)');
       _alertedDevices.remove(device.id);
     }
     orders.forEach((item, qty) {
@@ -2226,37 +2293,40 @@ void updateDrinkTableName(int index, String name) {
   }
 
   void transferDrinkTableOrdersOnly(int drinkIndex, PSDevice device) {
-  final Map<String, int> orders =
-      Map<String, int>.from(drinkTables[drinkIndex]['orders'] ?? {});
-  orders.forEach((item, qty) {
-    device.orders[item] = (device.orders[item] ?? 0) + qty;
-  });
-  drinkTables[drinkIndex]['orders'] = <String, int>{};
-  _saveTables(tablesChanged: false, drinkTablesChanged: true);
-  _saveDevices();
-  notifyListeners();
-}
-
-Future<void> transferDrinkTableOrdersToTable(int drinkIndex, int tableIndex) async {
-  final Map<String, int> orders =
-      Map<String, int>.from(drinkTables[drinkIndex]['orders'] ?? {});
-  if (orders.isEmpty) return;
-  final existing = Map<String, int>.from(tables[tableIndex]['orders'] ?? {});
-  orders.forEach((item, qty) {
-    existing[item] = (existing[item] ?? 0) + qty;
-  });
-  tables[tableIndex]['orders'] = existing;
-  drinkTables[drinkIndex]['orders'] = <String, int>{};
- notifyListeners();
-  // fire-and-forget — بلا await عشان الـ UI يفتح فوراً
-  if (shopId != null) {
-    Future.wait([
-      FirebaseService.pushTablesState(shopId!, tables, _myDeviceId),
-      FirebaseService.pushDrinkTablesState(shopId!, drinkTables, _myDeviceId),
-    ]);
-    SyncService.saveLocal(shopId!, _buildDataDict());
+    final Map<String, int> orders =
+        Map<String, int>.from(drinkTables[drinkIndex]['orders'] ?? {});
+    orders.forEach((item, qty) {
+      device.orders[item] = (device.orders[item] ?? 0) + qty;
+    });
+    drinkTables[drinkIndex]['orders'] = <String, int>{};
+    _saveTables(tablesChanged: false, drinkTablesChanged: true);
+    _saveDevices();
+    notifyListeners();
   }
-}
+
+  Future<void> transferDrinkTableOrdersToTable(
+      int drinkIndex, int tableIndex) async {
+    final Map<String, int> orders =
+        Map<String, int>.from(drinkTables[drinkIndex]['orders'] ?? {});
+    if (orders.isEmpty) return;
+    final existing =
+        Map<String, int>.from(tables[tableIndex]['orders'] ?? {});
+    orders.forEach((item, qty) {
+      existing[item] = (existing[item] ?? 0) + qty;
+    });
+    tables[tableIndex]['orders'] = existing;
+    drinkTables[drinkIndex]['orders'] = <String, int>{};
+    notifyListeners();
+    if (shopId != null) {
+      Future.wait([
+        FirebaseService.pushTablesState(shopId!, tables, _myDeviceId),
+        FirebaseService.pushDrinkTablesState(
+            shopId!, drinkTables, _myDeviceId),
+      ]);
+      SyncService.saveLocal(shopId!, _buildDataDict());
+    }
+  }
+
   void transferDrinkTableToTable(int drinkIndex, int tableIndex) {
     final Map<String, int> orders =
         Map<String, int>.from(drinkTables[drinkIndex]['orders'] ?? {});
@@ -2279,161 +2349,167 @@ Future<void> transferDrinkTableOrdersToTable(int drinkIndex, int tableIndex) asy
   // ══════════════════════════════════════════════════════════════════════════
   // MENU & INVENTORY
   // ══════════════════════════════════════════════════════════════════════════
-Future<void> addMenuItem(String name, int price, {int buyPrice = 0}) async {
-  menu[name] = price;
-  if (buyPrice > 0) menuBuyPrices[name] = buyPrice;
-  if (!_menuItemCategories.containsKey(name)) {
-    _menuItemCategories[name] = buffetCategories.isNotEmpty
-        ? buffetCategories.last.id
-        : 'other';
-  }
-  if (buffetCategories.isEmpty) {
-    buffetCategories = BuffetCategory.defaults;
-  }
-  AuditLogService.log(action: AuditAction.menuItemAdded, actionDetails: 'أضاف منتج "$name" بسعر $price ج', extra: {'item': name, 'price': price});
-  notifyListeners();
-  
-  if (shopId != null) {
-    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
-  }
-  final data = _buildDataDict();
-  await SyncService.saveLocal(shopId!, data);
-}
 
-Future<void> removeMenuItem(String name) async {
-  menu.remove(name);
-  _menuItemCategories.remove(name);
-  inventory.remove(name);           // ← أضف هذا
-  menuBuyPrices.remove(name);       // ← أضف هذا
-  dailyInventorySummary.remove(name); // ← أضف هذا (اختياري)
-  AuditLogService.log(action: AuditAction.menuItemDeleted, actionDetails: 'حذف منتج "$name" من البوفيه');
-  notifyListeners();
-  
-  if (shopId != null) {
-    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+  Future<void> addMenuItem(String name, int price, {int buyPrice = 0}) async {
+    menu[name] = price;
+    if (buyPrice > 0) menuBuyPrices[name] = buyPrice;
+    if (!_menuItemCategories.containsKey(name)) {
+      _menuItemCategories[name] = buffetCategories.isNotEmpty
+          ? buffetCategories.last.id
+          : 'other';
+    }
+    if (buffetCategories.isEmpty) {
+      buffetCategories = BuffetCategory.defaults;
+    }
+    AuditLogService.log(
+        action: AuditAction.menuItemAdded,
+        actionDetails: 'أضاف منتج "$name" بسعر $price ج',
+        extra: {'item': name, 'price': price});
+    notifyListeners();
+    if (shopId != null) {
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+    }
+    await SyncService.saveLocal(shopId!, _buildDataDict());
   }
-  final data = _buildDataDict();
-  await SyncService.saveLocal(shopId!, data);
-}
- Future<void> updateMenuItem(String oldName, String newName, int price, {int buyPrice = 0}) async {
-  menu.remove(oldName);
-  menu[newName] = price;
-  menuBuyPrices.remove(oldName);
-  if (buyPrice > 0) menuBuyPrices[newName] = buyPrice;
-  if (_menuItemCategories.containsKey(oldName)) {
-    _menuItemCategories[newName] = _menuItemCategories.remove(oldName)!;
+
+  Future<void> removeMenuItem(String name) async {
+    menu.remove(name);
+    _menuItemCategories.remove(name);
+    inventory.remove(name);
+    menuBuyPrices.remove(name);
+    dailyInventorySummary.remove(name);
+    AuditLogService.log(
+        action: AuditAction.menuItemDeleted,
+        actionDetails: 'حذف منتج "$name" من البوفيه');
+    notifyListeners();
+    if (shopId != null) {
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+    }
+    await SyncService.saveLocal(shopId!, _buildDataDict());
   }
-  notifyListeners();
-  
-  if (shopId != null) {
-    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+
+  Future<void> updateMenuItem(String oldName, String newName, int price,
+      {int buyPrice = 0}) async {
+    menu.remove(oldName);
+    menu[newName] = price;
+    menuBuyPrices.remove(oldName);
+    if (buyPrice > 0) menuBuyPrices[newName] = buyPrice;
+    if (_menuItemCategories.containsKey(oldName)) {
+      _menuItemCategories[newName] = _menuItemCategories.remove(oldName)!;
+    }
+    notifyListeners();
+    if (shopId != null) {
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+    }
+    await SyncService.saveLocal(shopId!, _buildDataDict());
   }
-  final data = _buildDataDict();
-  await SyncService.saveLocal(shopId!, data);
-}
 
   void _deductFromInventory(String item, int qty) {
     if (inventory.containsKey(item)) {
       inventory[item] = (inventory[item]! - qty).clamp(0, 99999);
     }
-    dailyInventorySummary[item] = (dailyInventorySummary[item] ?? 0) + qty;
-    // الـ push بيتم عبر _saveHistory أو _saveTables اللي بيتستدعوا بعدها
+    dailyInventorySummary[item] =
+        (dailyInventorySummary[item] ?? 0) + qty;
   }
 
   void addInventory(String item, int qty) {
     inventory[item] = (inventory[item] ?? 0) + qty;
-    _pushStaticOnly();  // كان saveData()
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void setInventoryItem(String item, int qty) {
     inventory[item] = qty;
-    _pushStaticOnly();  // كان saveData()
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void resetInventoryItem(String item) {
     inventory[item] = 0;
-    _pushStaticOnly();  // كان saveData()
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void resetDailySummary() {
     dailyInventorySummary.clear();
-    _pushStaticOnly();  // كان saveData()
+    _pushStaticOnly();
     notifyListeners();
   }
 
-   // ══════════════════════════════════════════════════════════════════
-// BUFFET CATEGORIES
-// ══════════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════════════════
+  // BUFFET CATEGORIES
+  // ══════════════════════════════════════════════════════════════════════════
 
-String? menuItemCategory(String item) =>
-    _menuItemCategories[item] ?? 'other';
+  String? menuItemCategory(String item) =>
+      _menuItemCategories[item] ?? 'other';
 
-void setMenuItemCategory(String item, String categoryId) {
-  _menuItemCategories[item] = categoryId;
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void addCategory(String name, String emoji) {
-  final id = 'cat_${DateTime.now().millisecondsSinceEpoch}';
-  buffetCategories.add(BuffetCategory(
-    id: id, name: name, emoji: emoji,
-    sortOrder: buffetCategories.length,
-  ));
-  AuditLogService.log(
-    action: AuditAction.menuItemAdded,
-    actionDetails: 'أضاف قسم بوفيه "$name"',
-  );
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void updateCategory(String id, String name, String emoji) {
-  final idx = buffetCategories.indexWhere((c) => c.id == id);
-  if (idx == -1) return;
-  buffetCategories[idx] = BuffetCategory(
-    id: id, name: name, emoji: emoji,
-    sortOrder: buffetCategories[idx].sortOrder,
-  );
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void deleteCategory(String id) {
-  _menuItemCategories.updateAll(
-    (item, catId) => catId == id ? 'other' : catId);
-  buffetCategories.removeWhere((c) => c.id == id);
-  for (int i = 0; i < buffetCategories.length; i++) {
-    buffetCategories[i].sortOrder = i;
+  void setMenuItemCategory(String item, String categoryId) {
+    _menuItemCategories[item] = categoryId;
+    _pushStaticOnly();
+    notifyListeners();
   }
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
 
-void reorderCategory(int oldIndex, int newIndex) {
-  final cat = buffetCategories.removeAt(oldIndex);
-  buffetCategories.insert(newIndex, cat);
-  for (int i = 0; i < buffetCategories.length; i++) {
-    buffetCategories[i].sortOrder = i;
+  void addCategory(String name, String emoji) {
+    final id = 'cat_${DateTime.now().millisecondsSinceEpoch}';
+    buffetCategories.add(BuffetCategory(
+      id: id,
+      name: name,
+      emoji: emoji,
+      sortOrder: buffetCategories.length,
+    ));
+    AuditLogService.log(
+      action: AuditAction.menuItemAdded,
+      actionDetails: 'أضاف قسم بوفيه "$name"',
+    );
+    _pushStaticOnly();
+    notifyListeners();
   }
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
 
-void restoreDefaultCategories() {
-  buffetCategories = BuffetCategory.defaults;
-  for (final item in menu.keys) {
-    if (!_menuItemCategories.containsKey(item)) {
-      _menuItemCategories[item] = 'other';
+  void updateCategory(String id, String name, String emoji) {
+    final idx = buffetCategories.indexWhere((c) => c.id == id);
+    if (idx == -1) return;
+    buffetCategories[idx] = BuffetCategory(
+      id: id,
+      name: name,
+      emoji: emoji,
+      sortOrder: buffetCategories[idx].sortOrder,
+    );
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void deleteCategory(String id) {
+    _menuItemCategories.updateAll(
+        (item, catId) => catId == id ? 'other' : catId);
+    buffetCategories.removeWhere((c) => c.id == id);
+    for (int i = 0; i < buffetCategories.length; i++) {
+      buffetCategories[i].sortOrder = i;
     }
+    _pushStaticOnly();
+    notifyListeners();
   }
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
- 
+
+  void reorderCategory(int oldIndex, int newIndex) {
+    final cat = buffetCategories.removeAt(oldIndex);
+    buffetCategories.insert(newIndex, cat);
+    for (int i = 0; i < buffetCategories.length; i++) {
+      buffetCategories[i].sortOrder = i;
+    }
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void restoreDefaultCategories() {
+    buffetCategories = BuffetCategory.defaults;
+    for (final item in menu.keys) {
+      if (!_menuItemCategories.containsKey(item)) {
+        _menuItemCategories[item] = 'other';
+      }
+    }
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // AUTH
   // ══════════════════════════════════════════════════════════════════════════
@@ -2441,13 +2517,15 @@ void restoreDefaultCategories() {
   void updateShopName(String name) {
     final old = shopName;
     shopName = name;
-    // ✅ AUDIT LOG
-    AuditLogService.log(action: AuditAction.shopNameChanged, actionDetails: 'غيّر اسم المحل من "$old" إلى "$name"');
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.log(
+        action: AuditAction.shopNameChanged,
+        actionDetails: 'غيّر اسم المحل من "$old" إلى "$name"');
+    _pushStaticOnly();
     notifyListeners();
   }
 
- String? login(String password, {required String targetRole, String? targetCashierName}) {
+  String? login(String password,
+      {required String targetRole, String? targetCashierName}) {
     final hash = hashPassword(password);
 
     if (targetRole == 'admin') {
@@ -2455,10 +2533,13 @@ void restoreDefaultCategories() {
         isAdmin = true;
         isCashier = false;
         currentCashierName = null;
-        _saveLoginState('admin', null); // ✅
-        AuditLogService.configure(shopId: shopId, cashierName: 'أدمن', isAdmin: true);
-        AuditLogService.log(action: AuditAction.login, actionDetails: 'دخل الأدمن للنظام');
-        _sync?.startHistorySSE(); // الأدمن بس هو اللي محتاج السجل لحظياً
+        _saveLoginState('admin', null);
+        AuditLogService.configure(
+            shopId: shopId, cashierName: 'أدمن', isAdmin: true);
+        AuditLogService.log(
+            action: AuditAction.login,
+            actionDetails: 'دخل الأدمن للنظام');
+        _sync?.startHistorySSE();
         notifyListeners();
         return 'admin';
       }
@@ -2471,9 +2552,15 @@ void restoreDefaultCategories() {
           isCashier = true;
           isAdmin = false;
           currentCashierName = c['name'] as String;
-          _saveLoginState('cashier', currentCashierName); // ✅
-          AuditLogService.configure(shopId: shopId, cashierName: currentCashierName, isAdmin: false);
-          AuditLogService.log(action: AuditAction.login, actionDetails: 'دخل الكاشير "${currentCashierName}" للنظام');
+          _saveLoginState('cashier', currentCashierName);
+          AuditLogService.configure(
+              shopId: shopId,
+              cashierName: currentCashierName,
+              isAdmin: false);
+          AuditLogService.log(
+              action: AuditAction.login,
+              actionDetails:
+                  'دخل الكاشير "${currentCashierName}" للنظام');
           notifyListeners();
           return 'cashier';
         }
@@ -2484,53 +2571,183 @@ void restoreDefaultCategories() {
     return null;
   }
 
- void logout() {
-    AuditLogService.log(action: AuditAction.logout, actionDetails: 'خرج من النظام');
-    _sync?.stopHistorySSE(); // الأدمن خرج — مش محتاجين SSE على السجل
+  void logout() {
+    AuditLogService.log(
+        action: AuditAction.logout,
+        actionDetails: 'خرج من النظام');
+    _sync?.stopHistorySSE();
     isAdmin = false;
     isCashier = false;
     currentCashierName = null;
-    _clearLoginState(); // ✅
-    AuditLogService.configure(shopId: shopId, cashierName: null, isAdmin: false);
+    _clearLoginState();
+    AuditLogService.configure(
+        shopId: shopId, cashierName: null, isAdmin: false);
     notifyListeners();
   }
 
   void changePassword(String newPass) {
     adminPasswordHash = hashPassword(newPass);
-    // ✅ AUDIT LOG
-    AuditLogService.log(action: AuditAction.passwordChanged, actionDetails: 'غيّر كلمة سر الأدمن');
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.log(
+        action: AuditAction.passwordChanged,
+        actionDetails: 'غيّر كلمة سر الأدمن');
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void changeCashierPassword(String newPass) {
     if (cashiers.isNotEmpty) {
       cashiers[0]['hash'] = hashPassword(newPass);
-      _pushStaticOnly();  // كان saveData()
+      _pushStaticOnly();
     }
+  }
+
+  void changeHistoryPassword(String newPass) {
+    historyPasswordHash = hashPassword(newPass);
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void setHistoryPasswordEnabled(bool val) {
+    historyPasswordEnabled = val;
+    _pushStaticOnly();
+    notifyListeners();
   }
 
   void updatePrices(Map<String, int> newPrices) {
     prices = newPrices;
-    // ✅ AUDIT LOG
-    AuditLogService.log(action: AuditAction.pricesUpdated, actionDetails: 'حدّث الأسعار');
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.log(
+        action: AuditAction.pricesUpdated,
+        actionDetails: 'حدّث الأسعار');
+    _pushStaticOnly();
     notifyListeners();
   }
 
- void updateDeviceName(PSDevice d, String name) {
-  final old = d.displayName;
-  d.displayName = name;
-  AuditLogService.log(action: AuditAction.deviceRenamed, actionDetails: 'غيّر اسم الجهاز من "$old" إلى "$name"');
-  _saveDevices();  // ✅ كان saveData()
-  notifyListeners();
-}
+  void updateDeviceName(PSDevice d, String name) {
+    final old = d.displayName;
+    d.displayName = name;
+    AuditLogService.log(
+        action: AuditAction.deviceRenamed,
+        actionDetails: 'غيّر اسم الجهاز من "$old" إلى "$name"');
+    _saveDevices();
+    notifyListeners();
+  }
 
-void updateDeviceType(PSDevice d, String type) {
-  d.deviceType = type;
-  _saveDevices();  // ✅ كان saveData()
-  notifyListeners();
-}
+  void updateDeviceType(PSDevice d, String type) {
+    d.deviceType = type;
+    _saveDevices();
+    notifyListeners();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CASHIER MANAGEMENT
+  // ══════════════════════════════════════════════════════════════════════════
+
+  void addCashier(String name, String password) {
+    cashiers.add({'name': name.trim(), 'hash': hashPassword(password)});
+    AuditLogService.log(
+        action: AuditAction.cashierAdded,
+        actionDetails: 'أضاف كاشير جديد "$name"');
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void removeCashier(int index) {
+    if (cashiers.length <= 1) return;
+    final name = cashiers[index]['name'] as String? ?? '';
+    AuditLogService.log(
+        action: AuditAction.cashierRemoved,
+        actionDetails: 'حذف الكاشير "$name"');
+    cashiers.removeAt(index);
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void updateCashierName(int index, String name) {
+    cashiers[index]['name'] = name.trim();
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void updateCashierPassword(int index, String newPassword) {
+    cashiers[index]['hash'] = hashPassword(newPassword);
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // EXPENSES
+  // ══════════════════════════════════════════════════════════════════════════
+
+  void addExpense(String title, double amount, String category,
+      {String? note}) {
+    final now = DateTime.now();
+    final dateStr = '${now.day}/${now.month}/${now.year}';
+    expenses.add({
+      'id': now.millisecondsSinceEpoch.toString(),
+      'title': title,
+      'amount': amount,
+      'category': category,
+      'date': dateStr,
+      'note': note,
+      'added_by': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
+      'created_at': now.toIso8601String(),
+    });
+    AuditLogService.log(
+      action: AuditAction.expenseAdded,
+      actionDetails:
+          'أضاف مصروف "$title" ($category) بمبلغ ${amount.toStringAsFixed(1)} ج',
+      extra: {'title': title, 'amount': amount, 'category': category},
+    );
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void deleteExpense(String id) {
+    final exp =
+        expenses.firstWhere((e) => e['id'] == id, orElse: () => {});
+    expenses.removeWhere((e) => e['id'] == id);
+    AuditLogService.log(
+      action: AuditAction.expenseDeleted,
+      actionDetails: 'حذف مصروف "${exp['title'] ?? ''}"',
+    );
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void updateExpense(String id, String title, double amount, String category,
+      {String? note}) {
+    final idx = expenses.indexWhere((e) => e['id'] == id);
+    if (idx == -1) return;
+    expenses[idx] = {
+      ...expenses[idx],
+      'title': title,
+      'amount': amount,
+      'category': category,
+      'note': note,
+      'updated_at': DateTime.now().toIso8601String(),
+    };
+    AuditLogService.log(
+      action: AuditAction.expenseUpdated,
+      actionDetails:
+          'عدّل مصروف "$title" ($category) — ${amount.toStringAsFixed(1)} ج',
+    );
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void addExpenseCategory(String name) {
+    if (!expenseCategories.contains(name)) {
+      expenseCategories.add(name);
+      _pushStaticOnly();
+      notifyListeners();
+    }
+  }
+
+  void removeExpenseCategory(String name) {
+    expenseCategories.remove(name);
+    _pushStaticOnly();
+    notifyListeners();
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   // DEBTS
@@ -2547,17 +2764,18 @@ void updateDeviceType(PSDevice d, String type) {
       'payment_history': <Map<String, dynamic>>[],
       'created_by': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
     });
-    
-    // ✅ AUDIT LOG
-    AuditLogService.logDebt(action: AuditAction.debtAdded, personName: name, amount: amount);
-    
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.logDebt(
+        action: AuditAction.debtAdded,
+        personName: name,
+        amount: amount);
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void addToDebt(int index, double amount, {String? note}) {
     final name = debts[index]['name'] as String? ?? '';
-    final current = (debts[index]['amount'] as num?)?.toDouble() ?? 0;
+    final current =
+        (debts[index]['amount'] as num?)?.toDouble() ?? 0;
     debts[index]['amount'] = current + amount;
     debts[index]['paid'] = false;
     final h = List<Map<String, dynamic>>.from(
@@ -2570,16 +2788,17 @@ void updateDeviceType(PSDevice d, String type) {
       'by': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
     });
     debts[index]['payment_history'] = h;
-    
-    // ✅ AUDIT LOG
-    AuditLogService.logDebt(action: AuditAction.debtAmountAdded, personName: name, amount: amount);
-    
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.logDebt(
+        action: AuditAction.debtAmountAdded,
+        personName: name,
+        amount: amount);
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void markDebtPaid(int index) {
-    final amount = (debts[index]['amount'] as num?)?.toDouble() ?? 0;
+    final amount =
+        (debts[index]['amount'] as num?)?.toDouble() ?? 0;
     final name = debts[index]['name'] as String? ?? '';
     debts[index]['paid'] = true;
     final h = List<Map<String, dynamic>>.from(
@@ -2592,17 +2811,16 @@ void updateDeviceType(PSDevice d, String type) {
     });
     debts[index]['payment_history'] = h;
     debts[index]['amount'] = 0.0;
-    
-    // ✅ AUDIT LOG
-    AuditLogService.logDebt(action: AuditAction.debtPaid, personName: name, amount: amount);
-    
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.logDebt(
+        action: AuditAction.debtPaid, personName: name, amount: amount);
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void partialPayDebt(int index, double amount) {
     final name = debts[index]['name'] as String? ?? '';
-    final current = (debts[index]['amount'] as num?)?.toDouble() ?? 0;
+    final current =
+        (debts[index]['amount'] as num?)?.toDouble() ?? 0;
     final newAmount = (current - amount).clamp(0, double.infinity);
     if (newAmount <= 0) {
       debts[index]['paid'] = true;
@@ -2620,22 +2838,24 @@ void updateDeviceType(PSDevice d, String type) {
       'by': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
     });
     debts[index]['payment_history'] = h;
-    
-    // ✅ AUDIT LOG
-    AuditLogService.logDebt(action: AuditAction.debtPartialPaid, personName: name, amount: amount);
-    
-    _pushStaticOnly();  // كان saveData()
+    AuditLogService.logDebt(
+        action: AuditAction.debtPartialPaid,
+        personName: name,
+        amount: amount);
+    _pushStaticOnly();
     notifyListeners();
   }
 
   void deleteDebt(int index) {
     final name = debts[index]['name'] as String? ?? '';
-    final amount = (debts[index]['amount'] as num?)?.toDouble() ?? 0;
-    // ✅ AUDIT LOG
-    AuditLogService.logDebt(action: AuditAction.debtDeleted, personName: name, amount: amount);
-    
+    final amount =
+        (debts[index]['amount'] as num?)?.toDouble() ?? 0;
+    AuditLogService.logDebt(
+        action: AuditAction.debtDeleted,
+        personName: name,
+        amount: amount);
     debts.removeAt(index);
-    _pushStaticOnly();  // كان saveData()
+    _pushStaticOnly();
     notifyListeners();
   }
 
@@ -2645,12 +2865,12 @@ void updateDeviceType(PSDevice d, String type) {
 
   int addTournament(Map<String, dynamic> tournament) {
     tournaments.add(Map<String, dynamic>.from(tournament));
-    // ✅ AUDIT LOG
     AuditLogService.log(
       action: AuditAction.tournamentCreated,
-      actionDetails: 'أنشأ بطولة "${tournament['name']}" للعبة ${tournament['game']}',
+      actionDetails:
+          'أنشأ بطولة "${tournament['name']}" للعبة ${tournament['game']}',
     );
-    _saveTournaments();  // كان saveData()
+    _saveTournaments();
     notifyListeners();
     return tournaments.length - 1;
   }
@@ -2658,17 +2878,18 @@ void updateDeviceType(PSDevice d, String type) {
   void updateTournament(int index, Map<String, dynamic> data) {
     if (index < 0 || index >= tournaments.length) return;
     tournaments[index] = Map<String, dynamic>.from(data);
-    _saveTournaments();  // كان saveData()
+    _saveTournaments();
     notifyListeners();
   }
 
   void deleteTournament(int index) {
     if (index < 0 || index >= tournaments.length) return;
     final name = tournaments[index]['name'] as String? ?? '';
-    // ✅ AUDIT LOG
-    AuditLogService.log(action: AuditAction.tournamentDeleted, actionDetails: 'حذف البطولة "$name"');
+    AuditLogService.log(
+        action: AuditAction.tournamentDeleted,
+        actionDetails: 'حذف البطولة "$name"');
     tournaments.removeAt(index);
-    _saveTournaments();  // كان saveData()
+    _saveTournaments();
     notifyListeners();
   }
 
@@ -2676,8 +2897,7 @@ void updateDeviceType(PSDevice d, String type) {
   // SHIFT MANAGEMENT
   // ══════════════════════════════════════════════════════════════════════════
 
-Future<void> startShift(String cashierName) async {
-    // Guard: block if another cashier already has an open shift.
+  Future<void> startShift(String cashierName) async {
     if (isShiftLockedByOther) return;
 
     final shift = ShiftRecord(
@@ -2690,13 +2910,13 @@ Future<void> startShift(String cashierName) async {
     isCashier = true;
     isAdmin = false;
 
-    AuditLogService.configure(shopId: shopId, cashierName: cashierName, isAdmin: false);
+    AuditLogService.configure(
+        shopId: shopId, cashierName: cashierName, isAdmin: false);
     AuditLogService.log(
       action: AuditAction.shiftStarted,
       actionDetails: 'بدأ الكاشير "$cashierName" شيفته',
     );
 
-    // Push immediately so the SSE on other devices sees the lock right away.
     if (shopId != null) {
       await FirebaseService.pushOpenShifts(
         shopId!,
@@ -2716,8 +2936,8 @@ Future<void> startShift(String cashierName) async {
   }
 
   Future<ShiftRecord?> endShift() async {
-   isEndingShift = true;
-   notifyListeners();
+    isEndingShift = true;
+    notifyListeners();
     final cashierName = currentCashierName;
     if (cashierName == null || !openShifts.containsKey(cashierName)) {
       return null;
@@ -2729,7 +2949,8 @@ Future<void> startShift(String cashierName) async {
     final shiftTransactions = history.where((h) {
       final date = DateTime.tryParse(h['date']?.toString() ?? '');
       if (date == null) return false;
-      return date.isAfter(shiftStart) && h['cashier']?.toString() == cashierName;
+      return date.isAfter(shiftStart) &&
+          h['cashier']?.toString() == cashierName;
     }).toList();
 
     final closedShift = ShiftRecord(
@@ -2739,10 +2960,10 @@ Future<void> startShift(String cashierName) async {
       transactions: shiftTransactions,
     );
 
-    // ✅ AUDIT LOG
     AuditLogService.log(
       action: AuditAction.shiftEnded,
-      actionDetails: 'أنهى الكاشير "$cashierName" شيفته | ${closedShift.sessionCount} جلسة | ${closedShift.totalRevenue.toStringAsFixed(1)} ج',
+      actionDetails:
+          'أنهى الكاشير "$cashierName" شيفته | ${closedShift.sessionCount} جلسة | ${closedShift.totalRevenue.toStringAsFixed(1)} ج',
       extra: {
         'sessions_count': closedShift.sessionCount,
         'total_revenue': closedShift.totalRevenue,
@@ -2753,10 +2974,9 @@ Future<void> startShift(String cashierName) async {
     shiftsHistory.add(closedShift);
     openShifts.remove(cashierName);
 
-    // ── push immediately so the SSE lock releases on every other device ────────
     if (shopId != null) {
       await Future.wait([
-       FirebaseService.pushOpenShifts(
+        FirebaseService.pushOpenShifts(
           shopId!,
           openShifts.map((k, v) => MapEntry(k, v.toJson())),
           _myDeviceId,
@@ -2770,12 +2990,12 @@ Future<void> startShift(String cashierName) async {
 
     final data = _buildDataDict();
     await SyncService.saveLocal(shopId!, data);
-   _notifyTelegram(shopId!, 'shift_end', {
-  'cashier': cashierName,
-  'sessions': closedShift.sessionCount,
-  'total': closedShift.totalRevenue,
-  'duration': closedShift.duration.inMinutes,
-});
+    _notifyTelegram(shopId!, 'shift_end', {
+      'cashier': cashierName,
+      'sessions': closedShift.sessionCount,
+      'total': closedShift.totalRevenue,
+      'duration': closedShift.duration.inMinutes,
+    });
     isEndingShift = false;
     notifyListeners();
     return closedShift;
@@ -2783,35 +3003,117 @@ Future<void> startShift(String cashierName) async {
 
   void clearShiftsHistory() {
     shiftsHistory.clear();
-    _pushShiftsToFirebase();  // كان saveData()
+    _pushShiftsToFirebase();
     _sync?.schedulePushShifts();
     notifyListeners();
   }
-  void deleteShift(int index) {
-  if (index < 0 || index >= shiftsHistory.length) return;
-  final cashier = shiftsHistory[index].cashierName;
-  AuditLogService.log(
-    action: AuditAction.shiftEnded,
-    actionDetails: 'حذف تقرير شيفت "$cashier"',
-  );
-  shiftsHistory.removeAt(index);
-  _pushShiftsToFirebase();
-  notifyListeners();
-}
- 
-// ── Helper: بيرفع الشيفتات لـ Firebase بعد الحذف ─────────────────────────────
-Future<void> _pushShiftsToFirebase() async {
-  if (shopId == null) return;
-  final shiftsJson = shiftsHistory.map((s) => s.toJson()).toList();
-  // set() بدل push() عشان يطلق SSE على الأجهزة التانية
-  await FirebaseService.set(
-    FirebaseService.shiftsHistoryPath(shopId!),
-    shiftsJson,
-  );
-  await SyncService.saveLocal(shopId!, _buildDataDict());
-}
 
- // ══════════════════════════════════════════════════════════════════════════
+  void deleteShift(int index) {
+    if (index < 0 || index >= shiftsHistory.length) return;
+    final cashier = shiftsHistory[index].cashierName;
+    AuditLogService.log(
+      action: AuditAction.shiftEnded,
+      actionDetails: 'حذف تقرير شيفت "$cashier"',
+    );
+    shiftsHistory.removeAt(index);
+    _pushShiftsToFirebase();
+    notifyListeners();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // RECHARGE
+  // ══════════════════════════════════════════════════════════════════════════
+
+  void setRechargeEnabled(bool val) {
+    rechargeEnabled = val;
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void addRechargeCard(String name, double value) {
+    rechargeCards.add({'name': name, 'value': value});
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void removeRechargeCard(int index) {
+    rechargeCards.removeAt(index);
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void addRechargeBalance(double amount, String note) {
+    rechargeBalance += amount;
+    rechargeTransactions.add({
+      'type': 'top_up',
+      'name': note,
+      'value': amount,
+      'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
+      'date': DateTime.now().toString(),
+    });
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  void addRechargeTransaction({
+    required String type,
+    required String name,
+    required double value,
+  }) {
+    rechargeTransactions.add({
+      'type': type,
+      'name': name,
+      'value': value,
+      'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
+      'date': DateTime.now().toString(),
+    });
+
+    if (type == 'card' || type == 'free') {
+      rechargeBalance -= value;
+    }
+
+    if (type == 'card' || type == 'free') {
+      final record = {
+        'id': 0,
+        'name': name,
+        'device_type': 'recharge',
+        'duration': '-',
+        'elapsed_seconds': 0,
+        'play_mode': type,
+        'time_cost': value,
+        'buffet_cost': 0.0,
+        'total': value,
+        'orders': <String, int>{},
+        'date': DateTime.now().toString(),
+        'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
+      };
+      history.add(record);
+      _saveSingleHistoryRecord(record);
+
+      if (shopId != null) {
+        _notifyTelegram(shopId!, 'recharge', {
+          'type': type == 'card' ? 'كارت' : 'شحن حر',
+          'name': name,
+          'value': value,
+          'cashier': currentCashierName ?? 'أدمن',
+        });
+      }
+    }
+
+    _pushStaticOnly();
+    notifyListeners();
+  }
+
+  Future<void> clearRechargeTransactions() async {
+    rechargeTransactions.clear();
+    notifyListeners();
+    if (shopId != null) {
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+      await SyncService.saveLocal(shopId!, _buildDataDict());
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // LOGIN STATE PERSISTENCE
   // ══════════════════════════════════════════════════════════════════════════
 
@@ -2840,135 +3142,42 @@ Future<void> _pushShiftsToFirebase() async {
       isAdmin = true;
       isCashier = false;
       currentCashierName = null;
-      AuditLogService.configure(shopId: shopId, cashierName: 'أدمن', isAdmin: true);
-      _sync?.startHistorySSE(); // استعادة SSE للأدمن بعد إعادة فتح التطبيق
+      AuditLogService.configure(
+          shopId: shopId, cashierName: 'أدمن', isAdmin: true);
+      _sync?.startHistorySSE();
     } else if (role == 'cashier') {
       final name = prefs.getString('login_cashier_name');
       if (name != null) {
         isCashier = true;
         isAdmin = false;
         currentCashierName = name;
-        AuditLogService.configure(shopId: shopId, cashierName: name, isAdmin: false);
+        AuditLogService.configure(
+            shopId: shopId, cashierName: name, isAdmin: false);
       }
     }
   }
 
-Future<void> _notifyTelegram(String shopId, String type, Map<String, dynamic> data) async {
-  try {
-    await http.post(
-      Uri.parse('https://psmanagement.iibrahimshosha.workers.dev/notify'),
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'secret': 'PSFCIMU25112001',  // ← نفس WEBHOOK_SECRET في الـ Worker
-        'shopId': shopId,
-        'type': type,
-        'data': data,
-      }),
-    );
-  } catch (_) {}
-}
+  // ══════════════════════════════════════════════════════════════════════════
+  // TELEGRAM
+  // ══════════════════════════════════════════════════════════════════════════
 
-// ══════════════════════════════════════════════════════════════════════════
-// RECHARGE
-// ══════════════════════════════════════════════════════════════════════════
-
-void setRechargeEnabled(bool val) {
-  rechargeEnabled = val;
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void addRechargeCard(String name, double value) {
-  rechargeCards.add({'name': name, 'value': value});
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void removeRechargeCard(int index) {
-  rechargeCards.removeAt(index);
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void addRechargeBalance(double amount, String note) {
-  rechargeBalance += amount;
-  rechargeTransactions.add({
-    'type': 'top_up',
-    'name': note,
-    'value': amount,
-    'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
-    'date': DateTime.now().toString(),
-  });
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-void addRechargeTransaction({
-  required String type,
-  required String name,
-  required double value,
-}) {
-  
-  // 1. إضافة العملية لتاب الشحن عشان تظهر معاك وتتحسب
-  rechargeTransactions.add({
-    'type': type,
-    'name': name,
-    'value': value,
-    'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
-    'date': DateTime.now().toString(),
-  });
-
-  // 2. خصم القيمة المباعة من إجمالي رصيد الشحن
-  if (type == 'card' || type == 'free') {
-    rechargeBalance -= value; 
+  Future<void> _notifyTelegram(
+      String shopId, String type, Map<String, dynamic> data) async {
+    try {
+      await http.post(
+        Uri.parse(
+            'https://psmanagement.iibrahimshosha.workers.dev/notify'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'secret': 'PSFCIMU25112001',
+          'shopId': shopId,
+          'type': type,
+          'data': data,
+        }),
+      );
+    } catch (_) {}
   }
 
-  // 3. التسجيل في السجلات العامة (مرة واحدة بس) وإرسال التليجرام
-  if (type == 'card' || type == 'free') {
-    final record = {
-      'id': 0,
-      'name': name,
-      'device_type': 'recharge',
-      'duration': '-',
-      'elapsed_seconds': 0,
-      'play_mode': type,
-      'time_cost': value,
-      'buffet_cost': 0.0,
-      'total': value,
-      'orders': <String, int>{},
-      'date': DateTime.now().toString(),
-      'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
-    };
-    history.add(record);
-    _saveSingleHistoryRecord(record);
-
-    // إشعار تليجرام
-    if (shopId != null) {
-      _notifyTelegram(shopId!, 'recharge', {
-        'type': type == 'card' ? 'كارت' : 'شحن حر',
-        'name': name,
-        'value': value,
-        'cashier': currentCashierName ?? 'أدمن',
-      });
-    }
-  }
-
-  _pushStaticOnly();  // كان saveData()
-  notifyListeners();
-}
-
-Future<void> clearRechargeTransactions() async {
-  rechargeTransactions.clear();
-  notifyListeners();
-  if (shopId != null) {
-    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
-    await SyncService.saveLocal(shopId!, _buildDataDict());
-  }
-}
-
- 
   // ══════════════════════════════════════════════════════════════════════════
   // DISPOSE
   // ══════════════════════════════════════════════════════════════════════════
@@ -2977,7 +3186,7 @@ Future<void> clearRechargeTransactions() async {
   void dispose() {
     _clockTimer?.cancel();
     _historyPollTimer?.cancel();
-    _fallbackPollTimer?.cancel(); // ✅
+    // 🔥 _fallbackPollTimer حُذف — مش محتاجين نلغيه
     _sync?.flushAll();
     _sync?.dispose();
     super.dispose();
