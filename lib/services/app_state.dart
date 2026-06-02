@@ -79,7 +79,7 @@ static const String _defaultHistoryHash =
   int numDevices = 0;
   bool isAdmin = false;
   bool isCashier = false;
-  String shopName = 'ElHarifa PlayStation';
+  String shopName = 'Shosha PlayStation';
 
   Timer? _clockTimer;
   SyncService? _sync;
@@ -1233,7 +1233,21 @@ Future<void> _saveTournaments() async {
     if (shopId == null) return;
     final data = _buildDataDict();
     await SyncService.saveLocal(shopId!, data);
-    await _sync?.pushDevices();
+    
+    if (deviceId != null) {
+      final idx = devices.indexWhere((d) => d.id == deviceId);
+      if (idx != -1) {
+        await _sync?.pushSingleDevice(idx, devices[idx].toJson());
+      }
+    } else {
+      await _sync?.pushDevices();
+    }
+  }
+
+  Future<void> _saveSingleHistoryRecord(Map<String, dynamic> newRecord) async {
+    if (shopId == null) return;
+    await SyncService.saveLocal(shopId!, _buildDataDict());
+    await _sync?.pushSingleHistory(newRecord);
   }
 
 Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drinkTablesChanged = false}) async {
@@ -1421,7 +1435,7 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       deviceType: d.deviceType,
       extra: '$matchPrice ج',
     );
-    _saveHistory();
+    _saveSingleHistoryRecord(record);
     notifyListeners();
   }
 
@@ -1452,7 +1466,7 @@ Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drink
       tableName: t['name'] ?? '',
       extra: '$gamePrice ج',
     );
-    _saveHistory();
+    _saveSingleHistoryRecord(record);
     notifyListeners();
   }
 
@@ -1509,7 +1523,7 @@ void addTime(PSDevice d, int minutes) {
   void setDeviceTimer(PSDevice d, int? minutes) {
     d.timerAlertMinutes = minutes;
     if (minutes == null) _alertedDevices.remove(d.id);
-    _saveDevices();
+    _saveDevices(deviceId: d.id);
     notifyListeners();
   }
 
@@ -1578,7 +1592,7 @@ _notifyTelegram(shopId!, 'session_end', {
 });
   d.orders = {};
   _saveDevices(deviceId: d.id);
-  _saveHistory();
+  _saveSingleHistoryRecord(record);
   notifyListeners();
   return record;
 }
@@ -1650,7 +1664,7 @@ _notifyTelegram(shopId!, 'session_end', {
     _countdownAlertedDevices.remove(d.id);
     _stoppingDevices.remove(d.id);
     _saveDevices(deviceId: d.id);
-    _saveHistory();
+    _saveSingleHistoryRecord(record);
     notifyListeners();
     return record;
   }
@@ -1722,6 +1736,7 @@ _notifyTelegram(shopId!, 'session_end', {
     _countdownAlertedDevices.remove(from.id);
 
 _saveDevices(deviceId: from.id);
+_saveDevices(deviceId: to.id);
     notifyListeners();
   }
 
@@ -1970,7 +1985,6 @@ void startTable(int index, {
       'duration': '${h}س ${m}د',
       'elapsed_seconds': elapsed,
        'play_mode': t['play_mode'] ?? 'normal', // ✅ احفظ نوع اللعب
-      'play_mode': 'table',
       'time_cost': timeCost,
       'buffet_cost': buffetCost,
       'total': timeCost + buffetCost,
@@ -1998,7 +2012,7 @@ void startTable(int index, {
     _stoppingTables.remove(index);
 
     _saveTables(tableIndex: index);
-    _saveHistory();
+    _saveSingleHistoryRecord(record);
     notifyListeners();
     return record;
   }
@@ -2156,7 +2170,7 @@ void updateDrinkTableName(int index, String name) {
     _checkoutDrinkTables.remove(index);
 
     _saveTables(tablesChanged: false, drinkTablesChanged: true);
-    _saveHistory();
+    _saveSingleHistoryRecord(record);
     notifyListeners();
     return record;
   }
@@ -2882,7 +2896,7 @@ void addRechargeTransaction({
 
   // 3. التسجيل في السجلات العامة (مرة واحدة بس) وإرسال التليجرام
   if (type == 'card' || type == 'free') {
-    history.add({
+    final record = {
       'id': 0,
       'name': name,
       'device_type': 'recharge',
@@ -2895,8 +2909,9 @@ void addRechargeTransaction({
       'orders': <String, int>{},
       'date': DateTime.now().toString(),
       'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
-    });
-    _saveHistory();
+    };
+    history.add(record);
+    _saveSingleHistoryRecord(record);
 
     // إشعار تليجرام
     if (shopId != null) {
