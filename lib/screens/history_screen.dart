@@ -42,6 +42,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 color: Color(0xFF38bdf8), fontWeight: FontWeight.bold)),
         leading: const BackButton(color: Colors.white),
         actions: [
+          // زرار تحديث السجل
+          IconButton(
+            icon: const Icon(Icons.refresh_rounded, color: Color(0xFF38bdf8)),
+            tooltip: 'تحديث السجل',
+            onPressed: () => context.read<AppState>().fetchHistoryOnDemand(limit: 300),
+          ),
           // زرار التقرير المفصل
           IconButton(
             icon: const Icon(Icons.bar_chart_rounded, color: Color(0xFFf59e0b)),
