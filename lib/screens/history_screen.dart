@@ -5,12 +5,28 @@ import '../services/app_state.dart';
 import 'archive_screen.dart';
 import 'daily_report_screen.dart';
 
-class HistoryScreen extends StatelessWidget {
+class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  @override
+  void initState() {
+    super.initState();
+    context.read<AppState>().fetchHistoryOnDemand();
+  }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    if (state.isLoadingHistory && state.history.isEmpty) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0b0e14),
+        body: Center(child: CircularProgressIndicator(color: Color(0xFF38bdf8))),
+      );
+    }
     final history = state.history.reversed.toList();
     final totalTime =
         state.history.fold(0.0, (s, h) => s + (h['time_cost'] ?? 0));
