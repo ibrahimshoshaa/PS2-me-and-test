@@ -1778,16 +1778,15 @@ Future<bool> archiveAndClear() async {
       final records = List<Map<String, dynamic>>.from(history);
       final date = DateTime.now().toString();
 
-      // ✅ كتابة الإجماليات في `archives` + التفاصيل في `archive_details` منفصلة
+      // ✅ كتابة الإجماليات فقط في `archives` — بدون حفظ تفاصيل الجلسات
       String? archiveId;
       for (int i = 0; i < 3 && archiveId == null; i++) {
-        archiveId = await FirebaseService.pushArchiveWithDetails(
+        archiveId = await FirebaseService.pushArchive(
           shopId: shopId!,
           date: date,
           totalTime: totalTime,
           totalBuffet: totalBuffet,
           totalOverall: totalTime + totalBuffet,
-          records: records,
         );
         if (archiveId == null) await Future.delayed(const Duration(seconds: 1));
       }
