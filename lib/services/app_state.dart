@@ -1110,13 +1110,13 @@ if (rechargeTxRaw != null) {
 
  void changeHistoryPassword(String newPass) {
   historyPasswordHash = hashPassword(newPass);
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
  void setHistoryPasswordEnabled(bool val) {
   historyPasswordEnabled = val;
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -1184,14 +1184,14 @@ void updateExpense(String id, String title, double amount,
 void addExpenseCategory(String name) {
   if (!expenseCategories.contains(name)) {
     expenseCategories.add(name);
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 }
  
 void removeExpenseCategory(String name) {
   expenseCategories.remove(name);
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
  // Helper — رفع المصروفات فوراً للـ Firebase
@@ -1200,6 +1200,23 @@ Future<void> _pushExpenses() async {
   await FirebaseService.pushStaticData(shopId!, _buildStaticData());
   final data = _buildDataDict();
   await SyncService.saveLocal(shopId!, data);
+}
+
+// Helper — رفع الـ static فقط (أسعار / ديون / إعدادات)
+Future<void> _pushStaticOnly() async {
+  if (shopId == null) return;
+  await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+  await SyncService.saveLocal(shopId!, _buildDataDict());
+}
+
+// Helper — رفع البطولات للـ Firebase
+Future<void> _saveTournaments() async {
+  if (shopId == null) return;
+  await FirebaseService.set(
+    FirebaseService.shopTournamentsPath(shopId!),
+    tournaments,
+  );
+  await SyncService.saveLocal(shopId!, _buildDataDict());
 }
   // ══════════════════════════════════════════════════════════════════════════
   // SAVE DATA
@@ -1251,7 +1268,7 @@ Future<void> _saveTables({int? tableIndex}) async {
     cashiers.add({'name': name.trim(), 'hash': hashPassword(password)});
     // ✅ AUDIT LOG
     AuditLogService.log(action: AuditAction.cashierAdded, actionDetails: 'أضاف كاشير جديد "$name"');
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -1261,19 +1278,19 @@ Future<void> _saveTables({int? tableIndex}) async {
     // ✅ AUDIT LOG
     AuditLogService.log(action: AuditAction.cashierRemoved, actionDetails: 'حذف الكاشير "$name"');
     cashiers.removeAt(index);
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
   void updateCashierName(int index, String name) {
     cashiers[index]['name'] = name.trim();
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
   void updateCashierPassword(int index, String newPassword) {
     cashiers[index]['hash'] = hashPassword(newPassword);
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -1454,7 +1471,7 @@ Future<void> _saveTables({int? tableIndex}) async {
       action: AuditAction.matchToggled,
       actionDetails: val ? 'فعّل زرار الماتش' : 'عطّل زرار الماتش',
     );
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -1796,7 +1813,7 @@ void removeDevice(int index) {
     } else {
       devices = devices.sublist(0, count);
     }
-    saveData();
+    _saveDevices();  // كان saveData()
     notifyListeners();
   }
 
@@ -2301,25 +2318,25 @@ Future<void> removeMenuItem(String name) async {
 
   void addInventory(String item, int qty) {
     inventory[item] = (inventory[item] ?? 0) + qty;
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
   void setInventoryItem(String item, int qty) {
     inventory[item] = qty;
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
   void resetInventoryItem(String item) {
     inventory[item] = 0;
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
   void resetDailySummary() {
     dailyInventorySummary.clear();
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2332,7 +2349,7 @@ String? menuItemCategory(String item) =>
 
 void setMenuItemCategory(String item, String categoryId) {
   _menuItemCategories[item] = categoryId;
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2346,7 +2363,7 @@ void addCategory(String name, String emoji) {
     action: AuditAction.menuItemAdded,
     actionDetails: 'أضاف قسم بوفيه "$name"',
   );
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2357,7 +2374,7 @@ void updateCategory(String id, String name, String emoji) {
     id: id, name: name, emoji: emoji,
     sortOrder: buffetCategories[idx].sortOrder,
   );
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2368,7 +2385,7 @@ void deleteCategory(String id) {
   for (int i = 0; i < buffetCategories.length; i++) {
     buffetCategories[i].sortOrder = i;
   }
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2378,7 +2395,7 @@ void reorderCategory(int oldIndex, int newIndex) {
   for (int i = 0; i < buffetCategories.length; i++) {
     buffetCategories[i].sortOrder = i;
   }
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2389,7 +2406,7 @@ void restoreDefaultCategories() {
       _menuItemCategories[item] = 'other';
     }
   }
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
  
@@ -2402,7 +2419,7 @@ void restoreDefaultCategories() {
     shopName = name;
     // ✅ AUDIT LOG
     AuditLogService.log(action: AuditAction.shopNameChanged, actionDetails: 'غيّر اسم المحل من "$old" إلى "$name"');
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2456,14 +2473,14 @@ void restoreDefaultCategories() {
     adminPasswordHash = hashPassword(newPass);
     // ✅ AUDIT LOG
     AuditLogService.log(action: AuditAction.passwordChanged, actionDetails: 'غيّر كلمة سر الأدمن');
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
   void changeCashierPassword(String newPass) {
     if (cashiers.isNotEmpty) {
       cashiers[0]['hash'] = hashPassword(newPass);
-      saveData();
+      _pushStaticOnly();  // كان saveData()
     }
   }
 
@@ -2471,7 +2488,7 @@ void restoreDefaultCategories() {
     prices = newPrices;
     // ✅ AUDIT LOG
     AuditLogService.log(action: AuditAction.pricesUpdated, actionDetails: 'حدّث الأسعار');
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2508,7 +2525,7 @@ void updateDeviceType(PSDevice d, String type) {
     // ✅ AUDIT LOG
     AuditLogService.logDebt(action: AuditAction.debtAdded, personName: name, amount: amount);
     
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2531,7 +2548,7 @@ void updateDeviceType(PSDevice d, String type) {
     // ✅ AUDIT LOG
     AuditLogService.logDebt(action: AuditAction.debtAmountAdded, personName: name, amount: amount);
     
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2553,7 +2570,7 @@ void updateDeviceType(PSDevice d, String type) {
     // ✅ AUDIT LOG
     AuditLogService.logDebt(action: AuditAction.debtPaid, personName: name, amount: amount);
     
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2581,7 +2598,7 @@ void updateDeviceType(PSDevice d, String type) {
     // ✅ AUDIT LOG
     AuditLogService.logDebt(action: AuditAction.debtPartialPaid, personName: name, amount: amount);
     
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2592,7 +2609,7 @@ void updateDeviceType(PSDevice d, String type) {
     AuditLogService.logDebt(action: AuditAction.debtDeleted, personName: name, amount: amount);
     
     debts.removeAt(index);
-    saveData();
+    _pushStaticOnly();  // كان saveData()
     notifyListeners();
   }
 
@@ -2607,7 +2624,7 @@ void updateDeviceType(PSDevice d, String type) {
       action: AuditAction.tournamentCreated,
       actionDetails: 'أنشأ بطولة "${tournament['name']}" للعبة ${tournament['game']}',
     );
-    saveData();
+    _saveTournaments();  // كان saveData()
     notifyListeners();
     return tournaments.length - 1;
   }
@@ -2615,7 +2632,7 @@ void updateDeviceType(PSDevice d, String type) {
   void updateTournament(int index, Map<String, dynamic> data) {
     if (index < 0 || index >= tournaments.length) return;
     tournaments[index] = Map<String, dynamic>.from(data);
-    saveData();
+    _saveTournaments();  // كان saveData()
     notifyListeners();
   }
 
@@ -2625,7 +2642,7 @@ void updateDeviceType(PSDevice d, String type) {
     // ✅ AUDIT LOG
     AuditLogService.log(action: AuditAction.tournamentDeleted, actionDetails: 'حذف البطولة "$name"');
     tournaments.removeAt(index);
-    saveData();
+    _saveTournaments();  // كان saveData()
     notifyListeners();
   }
 
@@ -2740,7 +2757,7 @@ Future<void> startShift(String cashierName) async {
 
   void clearShiftsHistory() {
     shiftsHistory.clear();
-    saveData();
+    _pushShiftsToFirebase();  // كان saveData()
     _sync?.schedulePushShifts();
     notifyListeners();
   }
@@ -2832,19 +2849,19 @@ Future<void> _notifyTelegram(String shopId, String type, Map<String, dynamic> da
 
 void setRechargeEnabled(bool val) {
   rechargeEnabled = val;
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
 void addRechargeCard(String name, double value) {
   rechargeCards.add({'name': name, 'value': value});
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
 void removeRechargeCard(int index) {
   rechargeCards.removeAt(index);
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2857,7 +2874,7 @@ void addRechargeBalance(double amount, String note) {
     'cashier': currentCashierName ?? (isAdmin ? 'أدمن' : 'كاشير'),
     'date': DateTime.now().toString(),
   });
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
@@ -2910,7 +2927,7 @@ void addRechargeTransaction({
     }
   }
 
-  saveData();
+  _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
 
