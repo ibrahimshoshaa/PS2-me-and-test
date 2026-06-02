@@ -14,16 +14,22 @@ class TournamentScreen extends StatefulWidget {
   State<TournamentScreen> createState() => _TournamentScreenState();
 }
 
+// بعد
 class _TournamentScreenState extends State<TournamentScreen> {
- 
-    // مفيش متغيرات محتاجها — البيانات جاية من AppState مباشرة
- 
+
+  @override
+  void initState() {
+    super.initState();
+    context.read<AppState>().fetchTournamentsOnDemand();
+  }
+
     void _deleteTournament(int index) {
       context.read<AppState>().deleteTournament(index);
     }
   @override
   Widget build(BuildContext context) {
     final isAdmin = context.watch<AppState>().isAdmin;
+    final isLoading = context.watch<AppState>().isLoadingTournaments;
     return Scaffold(
       backgroundColor: const Color(0xFF0b0e14),
       appBar: AppBar(
@@ -48,6 +54,8 @@ actions: [
       ),
       body: Builder(builder: (context) {
   final tournaments = context.watch<AppState>().tournaments;
+        if (isLoading && tournaments.isEmpty)
+  return const Center(child: CircularProgressIndicator(color: Color(0xFFfbbf24)));
   if (tournaments.isEmpty) {
     return _EmptyTournaments(
       isAdmin: isAdmin,
