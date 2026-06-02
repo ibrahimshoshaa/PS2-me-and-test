@@ -1768,30 +1768,31 @@ _saveDevices(deviceId: to.id);
     notifyListeners();
   }
 
-  Future<bool> archiveAndClear() async {
+Future<bool> archiveAndClear() async {
     if (history.isEmpty || shopId == null) return false;
     _sync?.pause();
     archiving = true;
     try {
       final totalTime = history.fold(0.0, (s, h) => s + (h['time_cost'] ?? 0));
       final totalBuffet = history.fold(0.0, (s, h) => s + (h['buffet_cost'] ?? 0));
-      final archive = {
-        'date': DateTime.now().toString(),
-        'total_time': totalTime,
-        'total_buffet': totalBuffet,
-        'total_overall': totalTime + totalBuffet,
-        'records': List<Map<String, dynamic>>.from(history),
-      };
-      String? result;
-      for (int i = 0; i < 3 && result == null; i++) {
-        result = await FirebaseService.push(
-            FirebaseService.shopArchivePath(shopId!), archive);
-        if (result == null) {
-          await Future.delayed(const Duration(seconds: 1));
-        }
+      final records = List<Map<String, dynamic>>.from(history);
+      final date = DateTime.now().toString();
+
+      // ✅ كتابة الإجماليات في `archives` + التفاصيل في `archive_details` منفصلة
+      String? archiveId;
+      for (int i = 0; i < 3 && archiveId == null; i++) {
+        archiveId = await FirebaseService.pushArchiveWithDetails(
+          shopId: shopId!,
+          date: date,
+          totalTime: totalTime,
+          totalBuffet: totalBuffet,
+          totalOverall: totalTime + totalBuffet,
+          records: records,
+        );
+        if (archiveId == null) await Future.delayed(const Duration(seconds: 1));
       }
-      if (result == null) return false;
-      
+      if (archiveId == null) return false;
+
       // ✅ AUDIT LOG — بعد ما الأرشفة تنجح
       AuditLogService.log(
         action: AuditAction.dayArchived,
