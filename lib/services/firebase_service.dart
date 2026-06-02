@@ -170,6 +170,14 @@ class FirebaseService {
   static String shopArchivePath(String shopId) =>
       'shops/$shopId/archives';
 
+  /// مسار التفاصيل الكاملة للأرشيف اليومي (منفصل عن الإجماليات)
+  static String shopArchiveDetailsPath(String shopId) =>
+      'shops/$shopId/archive_details';
+
+  /// مسار تفاصيل أرشيف يوم بعينه
+  static String shopArchiveDetailPath(String shopId, String archiveId) =>
+      'shops/$shopId/archive_details/$archiveId';
+
   static String shopYearlyArchivePath(String shopId) =>
       'shops/$shopId/yearly_archives';
 
@@ -272,6 +280,84 @@ class FirebaseService {
     return set(shopTournamentsPath(shopId), tournaments);
   }
 
+  // ─── أرشيف مقسّم (إجماليات + تفاصيل منفصلة) ───────────────────────────
+
+  /// يكتب الإجماليات في `archives` والجلسات الكاملة في `archive_details`.
+  static Future<String?> pushArchiveWithDetails({
+    required String shopId,
+    required String date,
+    required double totalTime,
+    required double totalBuffet,
+    required double totalOverall,
+    required List<Map<String, dynamic>> records,
+  }) async {
+    final archiveId = await push(shopArchivePath(shopId), {
+      'date': date,
+      'total_time': totalTime,
+      'total_buffet': totalBuffet,
+      'total_overall': totalOverall,
+      'records_count': records.length,
+    });
+    if (archiveId == null) return null;
+
+    final ok = await set(shopArchiveDetailPath(shopId, archiveId), {
+      'date': date,
+      'records': records,
+    });
+    if (!ok) {
+      await delete('${shopArchivePath(shopId)}/$archiveId');
+      return null;
+    }
+    return archiveId;
+  }
+
+  /// يجيب التفاصيل الكاملة لأرشيف يوم معيّن (استخدمه عند الطلب فقط).
+  static Future<List<Map<String, dynamic>>?> getArchiveDetails(
+      String shopId, String archiveId) async {
+    try {
+      final data = await get(shopArchiveDetailPath(shopId, archiveId));
+      if (data == null || data is! Map) return null;
+      final records = data['records'];
+      if (records == null) return [];
+      if (records is List) {
+        return records
+            .whereType<Map>()
+            .map((r) => Map<String, dynamic>.from(r))
+            .toList();
+      }
+      return [];
+    } catch (e) {
+      print('Firebase getArchiveDetails error [$archiveId]: $e');
+      return null;
+    }
+  }
+
+  /// يجيب قائمة إجماليات الأرشيف بدون الجلسات (خفيف جداً).
+  static Future<List<Map<String, dynamic>>> getArchivesList(
+      String shopId) async {
+    try {
+      final data = await get(shopArchivePath(shopId));
+      if (data == null) return [];
+      if (data is Map) {
+        return data.entries.map((e) {
+          final m = Map<String, dynamic>.from(e.value as Map);
+          m['_id'] = e.key;
+          return m;
+        }).toList()
+          ..sort((a, b) {
+            final da = DateTime.tryParse(a['date']?.toString() ?? '');
+            final db = DateTime.tryParse(b['date']?.toString() ?? '');
+            if (da == null || db == null) return 0;
+            return db.compareTo(da);
+          });
+      }
+      return [];
+    } catch (e) {
+      print('Firebase getArchivesList error: $e');
+      return [];
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Pull منفصل لكل نوع بيانات
   // ═══════════════════════════════════════════════════════════════════════════
@@ -280,7 +366,7 @@ class FirebaseService {
   /// — أسرع بكتير من تحميل كل السجلات لما تكون كتير
   static Future<List<Map<String, dynamic>>> getRecentHistory(
     String shopId, {
-    int limit = 100,
+    int limit = 200,
   }) async {
     try {
       final url = _urlWithQuery(historyPath(shopId), {
