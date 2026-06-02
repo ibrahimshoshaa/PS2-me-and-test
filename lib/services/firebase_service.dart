@@ -22,8 +22,12 @@ import 'package:http/http.dart' as http;
 class FirebaseService {
   static const String _baseUrl =
       'https://psmanagementapp-default-rtdb.firebaseio.com';
-  static const String _secret =
-      'uy6vaerRBXq497rXIltP2F5NJCn75dyev9DeHeSF';
+  // ⚠️ TODO: انقل الـ secret ده لـ --dart-define أو Firebase Environment Config
+  // flutter run --dart-define=FB_SECRET=your_secret
+  static const String _secret = String.fromEnvironment(
+    'FB_SECRET',
+    defaultValue: 'uy6vaerRBXq497rXIltP2F5NJCn75dyev9DeHeSF',
+  );
 
   static String _url(String path) => '$_baseUrl/$path.json?auth=$_secret';
 
@@ -231,10 +235,7 @@ class FirebaseService {
     return set(staticDataPath(shopId), staticData);
   }
 
-  static Future<bool> pushHistory(
-      String shopId, List<Map<String, dynamic>> history) async {
-    return set(historyPath(shopId), history);
-  }
+
 
   static Future<bool> appendSingleHistoryRecord(
       String shopId, Map<String, dynamic> singleRecord) async {
@@ -533,6 +534,7 @@ class FirebaseService {
             final typed = data.values
                 .map((h) => Map<String, dynamic>.from(h as Map))
                 .toList();
+            _sortHistoryByDate(typed);
             onData(typed);
           } catch (_) {}
         } else if (data is List) {
@@ -540,6 +542,7 @@ class FirebaseService {
             final typed = data
                 .map((h) => h != null ? Map<String, dynamic>.from(h as Map) : <String,dynamic>{})
                 .toList();
+            _sortHistoryByDate(typed);
             onData(typed);
           } catch (_) {}
         }
@@ -547,6 +550,19 @@ class FirebaseService {
       onError: onError,
       retryDelay: retryDelay,
     );
+  }
+
+  /// فارز السجلات من الأقدم للأحدث حسب حقل date أو timestamp
+  static void _sortHistoryByDate(List<Map<String, dynamic>> list) {
+    list.sort((a, b) {
+      final aVal = a['date'] ?? a['timestamp'] ?? a['created_at'];
+      final bVal = b['date'] ?? b['timestamp'] ?? b['created_at'];
+      if (aVal == null && bVal == null) return 0;
+      if (aVal == null) return -1;
+      if (bVal == null) return 1;
+      if (aVal is num && bVal is num) return aVal.compareTo(bVal);
+      return aVal.toString().compareTo(bVal.toString());
+    });
   }
 
   static StreamSubscription<dynamic> listenToDailySummary(
