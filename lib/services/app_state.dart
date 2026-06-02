@@ -9,7 +9,7 @@ import 'notification_service.dart';
 import '../services/shift_service.dart';
 import 'sync_service.dart';
 import 'audit_log_service.dart';
-import '../models/buffet_category.dart'; 
+import '../models/buffet_category.dart';
 import 'package:http/http.dart' as http;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -79,6 +79,7 @@ class AppState extends ChangeNotifier {
 
   // 🔥 FLAGS: هل البيانات الثقيلة اتحملت on-demand؟
   bool _historyLoaded = false;
+  bool _historyFetchedToday = false; // 🔥 عشان منجيبش أكتر من مرة في اليوم
   bool _shiftsHistoryLoaded = false;
   bool _tournamentsLoaded = false;
   bool _debtsLoaded = false;
@@ -284,11 +285,14 @@ class AppState extends ChangeNotifier {
           dailyInventorySummary = remoteSummary;
           notifyListeners();
         },
-        // 🔥 BANDWIDTH FIX #1: onRemoteHistory — بس للأدمن وبيحدّث incremental
+        // 🔥 BANDWIDTH FIX #1: onRemoteHistory — بس للأدمن، limit=1 من الـ SSE
         onRemoteHistory: (remoteHistory) {
-          if (remoteHistory.length > history.length) {
-            history.addAll(remoteHistory.skip(history.length));
-            notifyListeners();
+          for (final record in remoteHistory) {
+            final alreadyExists = history.any((h) => h['date'] == record['date']);
+            if (!alreadyExists) {
+              history.add(record);
+              notifyListeners();
+            }
           }
         },
         // 🔥 BANDWIDTH FIX #1: onRemoteShiftsHistory — بيتم on-demand، مش SSE دايم
@@ -1850,6 +1854,7 @@ class AppState extends ChangeNotifier {
 
       history.clear();
       _historyLoaded = false; // reset — لازم يتحمل on-demand بعد الأرشفة
+      _historyFetchedToday = false; // 🔥 يوم جديد = يجيب من أول
       await FirebaseService.set(FirebaseService.historyPath(shopId!), []);
       await _saveHistory();
       notifyListeners();
@@ -2540,6 +2545,10 @@ class AppState extends ChangeNotifier {
             action: AuditAction.login,
             actionDetails: 'دخل الأدمن للنظام');
         _sync?.startHistorySSE();
+        if (!_historyFetchedToday) {
+          fetchHistoryOnDemand(limit: 300);
+          _historyFetchedToday = true;
+        }
         notifyListeners();
         return 'admin';
       }
@@ -3145,6 +3154,10 @@ class AppState extends ChangeNotifier {
       AuditLogService.configure(
           shopId: shopId, cashierName: 'أدمن', isAdmin: true);
       _sync?.startHistorySSE();
+      if (!_historyFetchedToday) {
+        fetchHistoryOnDemand(limit: 300);
+        _historyFetchedToday = true;
+      }
     } else if (role == 'cashier') {
       final name = prefs.getString('login_cashier_name');
       if (name != null) {
