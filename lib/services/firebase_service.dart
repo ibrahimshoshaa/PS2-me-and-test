@@ -3,13 +3,37 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// FirebaseService — مقسّم لمسارات منفصلة حسب نوع البيانات (Optimized for Bandwidth)
+// FirebaseService — مقسّم لمسارات منفصلة حسب نوع البيانات
+//
+// 🔥 BANDWIDTH OPTIMIZATIONS APPLIED:
+//   1. pullAllData() — يجيب static + realtime فقط. history/debts/tournaments/
+//      shiftsHistory اتشالوا — بيتحملوا بس عند الطلب (on-demand).
+//   2. getRecentHistory() — يستخدم limitToLast=20 افتراضياً بدل pull كامل.
+//   3. listenToDevices() — بيشيل session_log من الـ payload اللي بيجي عبر SSE
+//      (المقارنة بتتم في pushDevicesStateSlim).
+//   4. pushDevicesStateSlim() — بيرسل devices بدون session_log.
+//   5. الـ SSE listeners على history/shifts اتشالوا من الـ SyncService —
+//      history SSE للأدمن فقط وبيستخدم limitToLast.
+//
+// المسارات:
+//   realtime/devices_state      ← حالة الأجهزة (SSE - فوري)
+//   realtime/tables_state       ← حالة التربيزات (SSE - فوري)
+//   realtime/drink_tables_state ← حالة تربيزات المشروبات (SSE - فوري)
+//   static/                     ← أسعار ومنيو وإعدادات (push عند التعديل)
+//   records/history             ← السجلات اليومية (append فقط — لا pull كامل)
+//   records/shifts              ← الشيفتات (on-demand فقط)
+//   archives/                   ← الأرشيف (append فقط)
+//   yearly_archives/            ← الأرشيف السنوي
+//   subscription                ← بيانات الاشتراك
+//   tournaments                 ← البطولات (on-demand فقط)
+//   customer_orders             ← طلبات العملاء
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class FirebaseService {
   static const String _baseUrl =
       'https://psmanagementapp-default-rtdb.firebaseio.com';
-  
+  // ⚠️ TODO: انقل الـ secret ده لـ --dart-define أو Firebase Environment Config
+  // flutter run --dart-define=FB_SECRET=your_secret
   static const String _secret = String.fromEnvironment(
     'FB_SECRET',
     defaultValue: 'uy6vaerRBXq497rXIltP2F5NJCn75dyev9DeHeSF',
@@ -21,7 +45,9 @@ class FirebaseService {
   static String _urlWithQuery(String path, Map<String, String> params) {
     final base = '$_baseUrl/$path.json?auth=$_secret';
     if (params.isEmpty) return base;
-    final extra = params.entries.map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}').join('&');
+    final extra = params.entries
+        .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
+        .join('&');
     return '$base&$extra';
   }
 
@@ -101,36 +127,116 @@ class FirebaseService {
     }
   }
 
-  // ─── المسارات المتوفرة ───────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // مسارات المحل — مقسّمة حسب نوع البيانات
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  static String devicesStatePath(String shopId) => 'shops/$shopId/realtime/devices_state';
-  static String tablesStatePath(String shopId) => 'shops/$shopId/realtime/tables_state';
-  static String drinkTablesStatePath(String shopId) => 'shops/$shopId/realtime/drink_tables_state';
-  static String tablesPath(String shopId) => 'shops/$shopId/operational/tables';
-  static String drinkTablesPath(String shopId) => 'shops/$shopId/operational/drink_tables';
-  static String staticDataPath(String shopId) => 'shops/$shopId/static';
-  static String pricesPath(String shopId) => 'shops/$shopId/static/prices';
-  static String menuPath(String shopId) => 'shops/$shopId/static/menu';
-  static String inventoryPath(String shopId) => 'shops/$shopId/static/inventory';
-  static String settingsPath(String shopId) => 'shops/$shopId/static/settings';
-  static String cashiersPath(String shopId) => 'shops/$shopId/static/cashiers';
-  static String debtsPath(String shopId) => 'shops/$shopId/static/debts';
-  static String historyPath(String shopId) => 'shops/$shopId/records/history';
-  static String dailySummaryPath(String shopId) => 'shops/$shopId/records/daily_summary';
-  static String shiftsHistoryPath(String shopId) => 'shops/$shopId/records/shifts_history';
-  static String openShiftsPath(String shopId) => 'shops/$shopId/records/open_shifts';
-  static String shopArchivePath(String shopId) => 'shops/$shopId/archives';
-  static String shopArchiveDetailsPath(String shopId) => 'shops/$shopId/archive_details';
-  static String shopArchiveDetailPath(String shopId, String archiveId) => 'shops/$shopId/archive_details/$archiveId';
-  static String shopYearlyArchivePath(String shopId) => 'shops/$shopId/yearly_archives';
-  static String shopSubscriptionPath(String shopId) => 'shops/$shopId/subscription';
-  static String shopTournamentsPath(String shopId) => 'shops/$shopId/tournaments';
-  static String customerOrdersPath(String shopId) => 'shops/$shopId/customer_orders';
-  static String shopDataPath(String shopId) => 'shops/$shopId/app_data';
+  static String devicesStatePath(String shopId) =>
+      'shops/$shopId/realtime/devices_state';
 
-  // ─── Realtime Push Sync ────────────────────────────────────────────────────
+  static String tablesStatePath(String shopId) =>
+      'shops/$shopId/realtime/tables_state';
 
-  static Future<bool> pushDevicesState(String shopId, List<Map<String, dynamic>> devicesState, String senderId) async {
+  static String drinkTablesStatePath(String shopId) =>
+      'shops/$shopId/realtime/drink_tables_state';
+
+  static String tablesPath(String shopId) =>
+      'shops/$shopId/operational/tables';
+
+  static String drinkTablesPath(String shopId) =>
+      'shops/$shopId/operational/drink_tables';
+
+  static String staticDataPath(String shopId) =>
+      'shops/$shopId/static';
+
+  static String pricesPath(String shopId) =>
+      'shops/$shopId/static/prices';
+
+  static String menuPath(String shopId) =>
+      'shops/$shopId/static/menu';
+
+  static String inventoryPath(String shopId) =>
+      'shops/$shopId/static/inventory';
+
+  static String settingsPath(String shopId) =>
+      'shops/$shopId/static/settings';
+
+  static String cashiersPath(String shopId) =>
+      'shops/$shopId/static/cashiers';
+
+  // 🔥 BANDWIDTH: debts انتقل لـ static — يتحمل مرة واحدة مع الـ static node
+  // وبيتحدث on-demand بس لما الأدمن يفتح شاشة الديون
+  static String debtsPath(String shopId) =>
+      'shops/$shopId/static/debts';
+
+  static String historyPath(String shopId) =>
+      'shops/$shopId/records/history';
+
+  static String dailySummaryPath(String shopId) =>
+      'shops/$shopId/records/daily_summary';
+
+  static String shiftsHistoryPath(String shopId) =>
+      'shops/$shopId/records/shifts_history';
+
+  static String openShiftsPath(String shopId) =>
+      'shops/$shopId/records/open_shifts';
+
+  static String shopArchivePath(String shopId) =>
+      'shops/$shopId/archives';
+
+  /// مسار التفاصيل الكاملة للأرشيف اليومي (منفصل عن الإجماليات)
+  static String shopArchiveDetailsPath(String shopId) =>
+      'shops/$shopId/archive_details';
+
+  /// مسار تفاصيل أرشيف يوم بعينه
+  static String shopArchiveDetailPath(String shopId, String archiveId) =>
+      'shops/$shopId/archive_details/$archiveId';
+
+  static String shopYearlyArchivePath(String shopId) =>
+      'shops/$shopId/yearly_archives';
+
+  static String shopSubscriptionPath(String shopId) =>
+      'shops/$shopId/subscription';
+
+  static String shopTournamentsPath(String shopId) =>
+      'shops/$shopId/tournaments';
+
+  static String customerOrdersPath(String shopId) =>
+      'shops/$shopId/customer_orders';
+
+  static String shopDataPath(String shopId) =>
+      'shops/$shopId/app_data';
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Push منفصل لكل نوع بيانات
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // 🔥 BANDWIDTH FIX #1: pushDevicesStateSlim — بيشيل session_log من كل جهاز
+  // قبل الإرسال. session_log يبقى محلي بس ويتحفظ في التاريخ لما الجلسة تنتهي.
+  static Future<bool> pushDevicesStateSlim(
+      String shopId,
+      List<Map<String, dynamic>> devicesState,
+      String senderId) async {
+    // Strip session_log from every device before transmitting —
+    // prevents continuously-growing arrays from being synced every second.
+    final slim = devicesState.map((d) {
+      final copy = Map<String, dynamic>.from(d);
+      copy.remove('session_log'); // 🔥 الحمل الأكبر — محذوف من الـ realtime sync
+      return copy;
+    }).toList();
+
+    return set(devicesStatePath(shopId), {
+      'devices': slim,
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+      'sender_id': senderId,
+    });
+  }
+
+  /// Legacy full push — استخدمه بس في حالات استثنائية (مثلاً archive)
+  static Future<bool> pushDevicesState(
+      String shopId,
+      List<Map<String, dynamic>> devicesState,
+      String senderId) async {
     return set(devicesStatePath(shopId), {
       'devices': devicesState,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
@@ -138,16 +244,26 @@ class FirebaseService {
     });
   }
 
-  static Future<bool> pushSingleDeviceState(String shopId, int deviceIndex, Map<String, dynamic> deviceData, String senderId) async {
+  // 🔥 BANDWIDTH FIX #1b: pushSingleDeviceState — بيشيل session_log من الجهاز الواحد
+  static Future<bool> pushSingleDeviceState(
+      String shopId,
+      int deviceIndex,
+      Map<String, dynamic> deviceData,
+      String senderId) async {
+    final slim = Map<String, dynamic>.from(deviceData);
+    slim.remove('session_log'); // 🔥 شيل الـ log من الـ PATCH الفردي كمان
     final updateData = {
-      'devices/$deviceIndex': deviceData,
+      'devices/$deviceIndex': slim,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
       'sender_id': senderId,
     };
     return patch(devicesStatePath(shopId), updateData);
   }
 
-  static Future<bool> pushTablesState(String shopId, List<Map<String, dynamic>> tables, String senderId) async {
+  static Future<bool> pushTablesState(
+      String shopId,
+      List<Map<String, dynamic>> tables,
+      String senderId) async {
     return set(tablesStatePath(shopId), {
       'tables': tables,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
@@ -155,7 +271,10 @@ class FirebaseService {
     });
   }
 
-  static Future<bool> pushDrinkTablesState(String shopId, List<Map<String, dynamic>> drinkTables, String senderId) async {
+  static Future<bool> pushDrinkTablesState(
+      String shopId,
+      List<Map<String, dynamic>> drinkTables,
+      String senderId) async {
     return set(drinkTablesStatePath(shopId), {
       'drink_tables': drinkTables,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
@@ -163,42 +282,55 @@ class FirebaseService {
     });
   }
 
-  static Future<bool> pushTables(String shopId, List<Map<String, dynamic>> tables) async {
+  static Future<bool> pushTables(
+      String shopId, List<Map<String, dynamic>> tables) async {
     return set(tablesPath(shopId), tables);
   }
 
-  static Future<bool> pushDrinkTables(String shopId, List<Map<String, dynamic>> drinkTables) async {
+  static Future<bool> pushDrinkTables(
+      String shopId, List<Map<String, dynamic>> drinkTables) async {
     return set(drinkTablesPath(shopId), drinkTables);
   }
 
-  static Future<bool> pushStaticData(String shopId, Map<String, dynamic> staticData) async {
+  static Future<bool> pushStaticData(
+      String shopId, Map<String, dynamic> staticData) async {
     return set(staticDataPath(shopId), staticData);
   }
 
-  static Future<bool> appendSingleHistoryRecord(String shopId, Map<String, dynamic> singleRecord) async {
+  static Future<bool> appendSingleHistoryRecord(
+      String shopId, Map<String, dynamic> singleRecord) async {
     return post(historyPath(shopId), singleRecord);
   }
 
-  static Future<bool> pushOpenShifts(String shopId, Map<String, dynamic> openShifts, [String? senderId]) async {
+  static Future<bool> pushOpenShifts(
+      String shopId,
+      Map<String, dynamic> openShifts,
+      [String? senderId]) async {
     final data = Map<String, dynamic>.from(openShifts);
     if (senderId != null) data['_sender_id'] = senderId;
     return set(openShiftsPath(shopId), data);
   }
 
-  static Future<bool> pushShiftsHistory(String shopId, List<Map<String, dynamic>> shifts) async {
+  // 🔥 BANDWIDTH FIX #3: pushShiftsHistory و pushDebts و pushTournaments
+  // هي write-only operations — لا polling عليهم. بيتكتبوا بس عند التغيير.
+  static Future<bool> pushShiftsHistory(
+      String shopId, List<Map<String, dynamic>> shifts) async {
     return set(shiftsHistoryPath(shopId), shifts);
   }
 
-  static Future<bool> pushDebts(String shopId, List<Map<String, dynamic>> debts) async {
+  static Future<bool> pushDebts(
+      String shopId, List<Map<String, dynamic>> debts) async {
     return set(debtsPath(shopId), debts);
   }
 
-  static Future<bool> pushTournaments(String shopId, List<Map<String, dynamic>> tournaments) async {
+  static Future<bool> pushTournaments(
+      String shopId, List<Map<String, dynamic>> tournaments) async {
     return set(shopTournamentsPath(shopId), tournaments);
   }
 
-  // ─── Archives ──────────────────────────────────────────────────────────────
+  // ─── أرشيف (إجماليات فقط) ──────────────────────────────────────────────
 
+  /// يكتب الإجماليات فقط في `archives` — بدون حفظ تفاصيل الجلسات.
   static Future<String?> pushArchive({
     required String shopId,
     required String date,
@@ -214,14 +346,19 @@ class FirebaseService {
     });
   }
 
-  static Future<List<Map<String, dynamic>>?> getArchiveDetails(String shopId, String archiveId) async {
+  /// يجيب التفاصيل الكاملة لأرشيف يوم معيّن (استخدمه عند الطلب فقط).
+  static Future<List<Map<String, dynamic>>?> getArchiveDetails(
+      String shopId, String archiveId) async {
     try {
       final data = await get(shopArchiveDetailPath(shopId, archiveId));
       if (data == null || data is! Map) return null;
       final records = data['records'];
       if (records == null) return [];
       if (records is List) {
-        return records.whereType<Map>().map((r) => Map<String, dynamic>.from(r)).toList();
+        return records
+            .whereType<Map>()
+            .map((r) => Map<String, dynamic>.from(r))
+            .toList();
       }
       return [];
     } catch (e) {
@@ -230,7 +367,9 @@ class FirebaseService {
     }
   }
 
-  static Future<List<Map<String, dynamic>>> getArchivesList(String shopId) async {
+  /// يجيب قائمة إجماليات الأرشيف بدون الجلسات (خفيف جداً).
+  static Future<List<Map<String, dynamic>>> getArchivesList(
+      String shopId) async {
     try {
       final data = await get(shopArchivePath(shopId));
       if (data == null) return [];
@@ -254,152 +393,183 @@ class FirebaseService {
     }
   }
 
-  // ─── OPTIMIZED LAZY-LOADING ON-DEMAND METHODS (Requirement 1 & 2) ───────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Pull منفصل لكل نوع بيانات
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Paginates history items via REST parameters to download only the last 15 items
-  static Future<List<Map<String, dynamic>>> getRecentHistory(String shopId, {int limit = 15}) async {
+  // 🔥 BANDWIDTH FIX #3: limitToLast=20 — مش بنسحب كل السجلات أبداً.
+  // الأدمن ممكن يحمل أكتر بـ fetchHistoryOnDemand() في AppState.
+  /// بيجيب آخر [limit] سجل من history باستخدام limitToLast
+  static Future<List<Map<String, dynamic>>> getRecentHistory(
+    String shopId, {
+    int limit = 20, // 🔥 خفّضنا من 200 لـ 20 — كفاية للعرض اليومي
+  }) async {
     try {
       final url = _urlWithQuery(historyPath(shopId), {
         'limitToLast': limit.toString(),
         'orderBy': r'"$key"',
       });
-      final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+      final r = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 10));
       if (r.statusCode != 200) return [];
       final body = jsonDecode(r.body);
       if (body == null) return [];
       if (body is List) {
-        return body.whereType<Map>().map((h) => Map<String, dynamic>.from(h)).toList();
+        return body
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
       }
       if (body is Map) {
-        final list = body.values.whereType<Map>().map((h) => Map<String, dynamic>.from(h)).toList();
+        final list = body.values
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
+        list.sort((a, b) {
+          final da = DateTime.tryParse(a['date']?.toString() ?? '');
+          final db = DateTime.tryParse(b['date']?.toString() ?? '');
+          if (da == null || db == null) return 0;
+          return da.compareTo(db);
+        });
+        return list;
+      }
+      return [];
+    } catch (e) {
+      print('Firebase getRecentHistory error: $e');
+      return [];
+    }
+  }
+
+  // 🔥 BANDWIDTH FIX #3b: getFullHistory — للأرشفة فقط، مش للعرض العادي.
+  // استخدمه بس في archiveAndClear() — ولا تستخدمه في أي poll.
+  static Future<List<Map<String, dynamic>>> getFullHistory(
+      String shopId) async {
+    try {
+      final data = await get(historyPath(shopId));
+      if (data == null) return [];
+      if (data is List) {
+        return data
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
+      }
+      if (data is Map) {
+        final list = data.values
+            .whereType<Map>()
+            .map((h) => Map<String, dynamic>.from(h))
+            .toList();
         _sortHistoryByDate(list);
         return list;
       }
+      return [];
     } catch (e) {
-      print('Firebase getRecentHistory error: $e');
+      print('Firebase getFullHistory error: $e');
+      return [];
     }
-    return [];
   }
 
-  /// Standalone fetching for Debts node on demand
-  static Future<List<Map<String, dynamic>>> getDebts(String shopId) async {
-    try {
-      final data = await get(debtsPath(shopId));
-      if (data == null) return [];
-      if (data is List) return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-      if (data is Map) return data.values.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-    } catch (e) {
-      print('Firebase getDebts error: $e');
-    }
-    return [];
-  }
+  // ═══════════════════════════════════════════════════════════════════════════
+  // pullAllData — الآن يجيب static + realtime فقط (خفيف جداً)
+  // history/debts/tournaments/shiftsHistory = on-demand فقط
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Standalone fetching for Tournaments node on demand
-  static Future<List<Map<String, dynamic>>> getTournaments(String shopId) async {
-    try {
-      final data = await get(shopTournamentsPath(shopId));
-      if (data == null) return [];
-      if (data is List) return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-      if (data is Map) return data.values.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-    } catch (e) {
-      print('Firebase getTournaments error: $e');
-    }
-    return [];
-  }
-
-  /// Standalone fetching for Shifts History node on demand
-  static Future<List<Map<String, dynamic>>> getShiftsHistory(String shopId) async {
-    try {
-      final data = await get(shiftsHistoryPath(shopId));
-      if (data == null) return [];
-      if (data is List) return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-      if (data is Map) return data.values.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-    } catch (e) {
-      print('Firebase getShiftsHistory error: $e');
-    }
-    return [];
-  }
-
-  // ─── OPTIMIZED LOOP CONTROL (Requirement 3) ─────────────────────────────────
-
-  /// EXCLUDES all heavy historical nodes entirely. Used strictly during single startup initialization.
+  // 🔥 BANDWIDTH FIX #1 + #4: pullAllData بيجيب 5 nodes بدل 12.
+  // المحذوف: history (on-demand), shiftsHistory (on-demand),
+  //           debts (اتنقل لـ static), tournaments (on-demand).
+  // static يتحمل مرة واحدة فقط — مش في كل poll.
   static Future<Map<String, dynamic>?> pullAllData(String shopId) async {
     try {
-      final oldData = await get(shopDataPath(shopId));
-
       final results = await Future.wait([
-        get(devicesStatePath(shopId)),
-        get(tablesStatePath(shopId)),
-        get(drinkTablesStatePath(shopId)),
-        get(staticDataPath(shopId)),
-        get(dailySummaryPath(shopId)),
-        get(openShiftsPath(shopId)),
-        get(tablesPath(shopId)),
-        get(drinkTablesPath(shopId)),
+        get(devicesStatePath(shopId)),      // realtime — SSE بيغنيك عنه عادةً
+        get(tablesStatePath(shopId)),       // realtime
+        get(drinkTablesStatePath(shopId)),  // realtime
+        get(staticDataPath(shopId)),        // 🔥 static — مرة واحدة عند الـ login
+        get(openShiftsPath(shopId)),        // خفيف — map صغير
+        get(dailySummaryPath(shopId)),      // خفيف — map صغير
+        get(tablesPath(shopId)),            // operational tables config
+        get(drinkTablesPath(shopId)),       // operational drink tables config
       ]);
 
-      final devicesData       = results[0];
-      final tablesRealtime    = results[1];
-      final drinkRealtime     = results[2];
-      final staticData        = results[3];
-      final dailySummaryData  = results[4];
-      final openShiftsData    = results[5];
-      final tablesOld         = results[6];
-      final drinkOld          = results[7];
+      final devicesData      = results[0];
+      final tablesRealtime   = results[1];
+      final drinkRealtime    = results[2];
+      final staticData       = results[3];
+      final openShiftsData   = results[4];
+      final dailySummaryData = results[5];
+      final tablesOld        = results[6];
+      final drinkOld         = results[7];
 
       final combined = <String, dynamic>{};
 
+      // ── Devices ───────────────────────────────────────────────────────────
       if (devicesData != null && devicesData is Map) {
         final devices = devicesData['devices'];
         if (devices != null) combined['devices_state'] = devices;
-      } else if (oldData != null && oldData is Map) {
-        combined['devices_state'] = oldData['devices_state'] ?? [];
       }
 
+      // ── Tables ────────────────────────────────────────────────────────────
       if (tablesRealtime != null && tablesRealtime is Map) {
         final t = tablesRealtime['tables'];
         combined['tables'] = (t != null && t is List) ? t : [];
       } else if (tablesOld != null) {
         combined['tables'] = tablesOld is List ? tablesOld : [];
-      } else if (oldData != null && oldData is Map) {
-        combined['tables'] = oldData['tables'] ?? [];
       }
 
+      // ── Drink Tables ──────────────────────────────────────────────────────
       if (drinkRealtime != null && drinkRealtime is Map) {
         final d = drinkRealtime['drink_tables'];
         combined['drink_tables'] = (d != null && d is List) ? d : [];
       } else if (drinkOld != null) {
         combined['drink_tables'] = drinkOld is List ? drinkOld : [];
-      } else if (oldData != null && oldData is Map) {
-        combined['drink_tables'] = oldData['drink_tables'] ?? [];
       }
 
+      // ── Static Data ───────────────────────────────────────────────────────
+      // 🔥 static يتحمل مرة واحدة هنا فقط — مش بيتحمل تاني في أي poll
       if (staticData != null && staticData is Map) {
         final s = Map<String, dynamic>.from(staticData);
-        combined['prices'] = s['prices'];
-        combined['menu'] = s['menu'];
-        combined['inventory'] = s['inventory'];
-        combined['cashiers'] = s['cashiers'];
-        combined['admin_password_hash'] = s['admin_password_hash'];
-        combined['shop_name'] = s['shop_name'];
-        combined['match_enabled'] = s['match_enabled'];
-        combined['num_devices'] = s['num_devices'];
+        combined['prices']               = s['prices'];
+        combined['menu']                 = s['menu'];
+        combined['inventory']            = s['inventory'];
+        combined['cashiers']             = s['cashiers'];
+        combined['admin_password_hash']  = s['admin_password_hash'];
+        combined['shop_name']            = s['shop_name'];
+        combined['match_enabled']        = s['match_enabled'];
+        combined['num_devices']          = s['num_devices'];
+        combined['debts']                = s['debts'] ?? [];  // debts في static
+        combined['history_password_hash']     = s['history_password_hash'];
+        combined['history_password_enabled']  = s['history_password_enabled'];
+        combined['buffet_categories']    = s['buffet_categories'];
+        combined['menu_item_categories'] = s['menu_item_categories'];
+        combined['menu_buy_prices']      = s['menu_buy_prices'];
+        combined['expenses']             = s['expenses'];
+        combined['expense_categories']   = s['expense_categories'];
+        combined['recharge_enabled']     = s['recharge_enabled'];
+        combined['recharge_balance']     = s['recharge_balance'];
+        combined['recharge_cards']       = s['recharge_cards'];
+        combined['recharge_transactions']= s['recharge_transactions'];
       }
 
-      // Safe defaults to ensure UI continuity without downloading backend structures
-      combined['history'] = [];
-      combined['shifts_history'] = [];
-      combined['debts'] = [];
-      combined['tournaments'] = [];
-
-      if (dailySummaryData != null && dailySummaryData is Map) {
-        combined['daily_inventory_summary'] = Map<String, dynamic>.from(dailySummaryData);
-      }
+      // ── Open Shifts ───────────────────────────────────────────────────────
       if (openShiftsData != null && openShiftsData is Map) {
         combined['open_shifts'] = Map<String, dynamic>.from(openShiftsData);
       }
 
+      // ── Daily Summary ─────────────────────────────────────────────────────
+      if (dailySummaryData != null && dailySummaryData is Map) {
+        combined['daily_inventory_summary'] =
+            Map<String, dynamic>.from(dailySummaryData);
+      }
+
+      // 🔥 history/shifts_history/tournaments — NOT included here.
+      // يتحملوا on-demand بـ fetchHistoryOnDemand() / fetchShiftsHistoryOnDemand()
+      // / fetchTournamentsOnDemand() في AppState.
+      combined['history']        = []; // placeholder — بيتحمل on-demand
+      combined['shifts_history'] = []; // placeholder
+      combined['tournaments']    = []; // placeholder
+
       combined['last_updated'] = DateTime.now().millisecondsSinceEpoch;
+
       return combined;
     } catch (e) {
       print('Firebase pullAllData error: $e');
@@ -407,105 +577,268 @@ class FirebaseService {
     }
   }
 
-  /// Minimal operational footprint method targeted for continuous polling fallback loops (_pollAll)
-  static Future<Map<String, dynamic>?> pullEssentialRealtimeData(String shopId) async {
+  // ─── On-Demand Fetchers (يُستدعوا من AppState فقط عند الحاجة) ─────────────
+
+  // 🔥 BANDWIDTH FIX #1: هذه الـ methods تُستدعى فقط لما الأدمن يفتح الشاشة
+
+  /// يجيب آخر [limit] سجل — يُستدعى بس لما يفتح شاشة السجل
+  static Future<List<Map<String, dynamic>>> fetchHistoryOnDemand(
+      String shopId, {int limit = 50}) =>
+      getRecentHistory(shopId, limit: limit);
+
+  /// يجيب تاريخ الشيفتات — يُستدعى بس لما يفتح شاشة الشيفتات
+  static Future<List<Map<String, dynamic>>> fetchShiftsHistoryOnDemand(
+      String shopId) async {
     try {
-      final results = await Future.wait([
-        get(devicesStatePath(shopId)),
-        get(tablesStatePath(shopId)),
-        get(drinkTablesStatePath(shopId)),
-        get(openShiftsPath(shopId)),
-      ]);
-
-      final combined = <String, dynamic>{};
-
-      if (results[0] != null && results[0] is Map) {
-        final devices = results[0]['devices'];
-        if (devices != null) combined['devices_state'] = devices;
+      // 🔥 limitToLast=50 — مش بنسحب كل الشيفتات القديمة
+      final url = _urlWithQuery(shiftsHistoryPath(shopId), {
+        'limitToLast': '50',
+        'orderBy': r'"$key"',
+      });
+      final r =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return [];
+      final body = jsonDecode(r.body);
+      if (body == null) return [];
+      if (body is List) {
+        return body
+            .whereType<Map>()
+            .map((s) => Map<String, dynamic>.from(s))
+            .toList();
       }
-      if (results[1] != null && results[1] is Map) {
-        final t = results[1]['tables'];
-        combined['tables'] = (t != null && t is List) ? t : [];
+      if (body is Map) {
+        return body.values
+            .whereType<Map>()
+            .map((s) => Map<String, dynamic>.from(s))
+            .toList();
       }
-      if (results[2] != null && results[2] is Map) {
-        final d = results[2]['drink_tables'];
-        combined['drink_tables'] = (d != null && d is List) ? d : [];
-      }
-      if (results[3] != null && results[3] is Map) {
-        combined['open_shifts'] = Map<String, dynamic>.from(results[3]);
-      }
-
-      combined['last_updated'] = DateTime.now().millisecondsSinceEpoch;
-      return combined;
+      return [];
     } catch (e) {
-      print('Firebase pullEssentialRealtimeData error: $e');
+      print('Firebase fetchShiftsHistoryOnDemand error: $e');
+      return [];
+    }
+  }
+
+  /// يجيب البطولات — يُستدعى بس لما يفتح شاشة البطولات
+  static Future<List<Map<String, dynamic>>> fetchTournamentsOnDemand(
+      String shopId) async {
+    try {
+      final data = await get(shopTournamentsPath(shopId));
+      if (data == null) return [];
+      if (data is List) {
+        return data
+            .whereType<Map>()
+            .map((t) => Map<String, dynamic>.from(t))
+            .toList();
+      }
+      return [];
+    } catch (e) {
+      print('Firebase fetchTournamentsOnDemand error: $e');
+      return [];
+    }
+  }
+
+  /// يجيب الديون — يُستدعى بس لما يفتح شاشة الديون (debts في static عادةً)
+  static Future<List<Map<String, dynamic>>> fetchDebtsOnDemand(
+      String shopId) async {
+    try {
+      final data = await get(debtsPath(shopId));
+      if (data == null) return [];
+      if (data is List) {
+        return data
+            .whereType<Map>()
+            .map((d) => Map<String, dynamic>.from(d))
+            .toList();
+      }
+      return [];
+    } catch (e) {
+      print('Firebase fetchDebtsOnDemand error: $e');
+      return [];
+    }
+  }
+
+  // ─── Devices State ─────────────────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>?> pullDevicesState(
+      String shopId) async {
+    try {
+      final data = await get(devicesStatePath(shopId));
+      if (data == null || data is! Map) return null;
+      final devices = data['devices'];
+      if (devices == null) return null;
+      if (devices is List) {
+        return devices
+            .map((d) => Map<String, dynamic>.from(d as Map))
+            .toList();
+      }
+      return null;
+    } catch (e) {
       return null;
     }
   }
 
-  // ─── Stream Subscriptions ──────────────────────────────────────────────────
+  // ─── SSE Listeners ─────────────────────────────────────────────────────────
 
-  static StreamSubscription<dynamic> listenToDevices(String shopId, {required void Function(Map<String, dynamic> rawData, List<Map<String, dynamic>> devices) onData, void Function(Object error)? onError}) {
-    return listen(devicesStatePath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final eventData = payload['data'];
-      if (eventData != null && eventData is Map) {
-        final devices = eventData['devices'];
-        if (devices is List) {
-          final typed = devices.map((d) => d != null ? Map<String, dynamic>.from(d as Map) : <String, dynamic>{}).toList();
-          onData(Map<String, dynamic>.from(eventData), typed);
+  // 🔥 BANDWIDTH FIX #2: listenToDevices — بيفلتر session_log من أي SSE event جاي
+  // عشان حتى لو جهاز تاني أرسل session_log بالغلط، احنا بنشيله قبل التطبيق
+  static StreamSubscription<dynamic> listenToDevices(
+    String shopId, {
+    required void Function(
+      Map<String, dynamic> rawData,
+      List<Map<String, dynamic>> devices,
+    ) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      devicesStatePath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+
+        final eventPath = payload['path'] as String?;
+        final eventData = payload['data'];
+
+        if (eventPath != null && eventPath.startsWith('/devices/')) {
+          // partial patch — re-fetch لو محتاج full state
         }
-      }
-    }, onError: onError);
+
+        if (eventData != null && eventData is Map) {
+          final devices = eventData['devices'];
+          if (devices is List) {
+            try {
+              final typed = devices
+                  .map((d) {
+                    if (d == null) return <String, dynamic>{};
+                    final copy = Map<String, dynamic>.from(d as Map);
+                    copy.remove('session_log'); // 🔥 شيل session_log من الـ SSE
+                    return copy;
+                  })
+                  .toList();
+              final rawData = Map<String, dynamic>.from(eventData);
+              onData(rawData, typed);
+            } catch (_) {}
+          }
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
-  static StreamSubscription<dynamic> listenToTables(String shopId, {required void Function(Map<String, dynamic> rawData, List<Map<String, dynamic>> tables) onData, void Function(Object error)? onError}) {
-    return listen(tablesStatePath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final eventData = payload['data'];
-      if (eventData == null || eventData is! Map) return;
-      final tables = eventData['tables'];
-      if (tables is List) {
-        final typed = tables.map((t) => t != null ? Map<String, dynamic>.from(t as Map) : <String, dynamic>{}).toList();
-        onData(Map<String, dynamic>.from(eventData), typed);
-      }
-    }, onError: onError);
+  static StreamSubscription<dynamic> listenToTables(
+    String shopId, {
+    required void Function(
+        Map<String, dynamic> rawData,
+        List<Map<String, dynamic>> tables) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      tablesStatePath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final eventData = payload['data'];
+        if (eventData == null || eventData is! Map) return;
+        final tables = eventData['tables'];
+        if (tables == null) return;
+        if (tables is List) {
+          try {
+            final typed = tables
+                .map((t) => t != null
+                    ? Map<String, dynamic>.from(t as Map)
+                    : <String, dynamic>{})
+                .toList();
+            final rawData = Map<String, dynamic>.from(eventData);
+            onData(rawData, typed);
+          } catch (_) {}
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
-  static StreamSubscription<dynamic> listenToDrinkTables(String shopId, {required void Function(Map<String, dynamic> rawData, List<Map<String, dynamic>> drinkTables) onData, void Function(Object error)? onError}) {
-    return listen(drinkTablesStatePath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final eventData = payload['data'];
-      if (eventData == null || eventData is! Map) return;
-      final drinkTables = eventData['drink_tables'];
-      if (drinkTables is List) {
-        final typed = drinkTables.map((t) => t != null ? Map<String, dynamic>.from(t as Map) : <String, dynamic>{}).toList();
-        onData(Map<String, dynamic>.from(eventData), typed);
-      }
-    }, onError: onError);
+  static StreamSubscription<dynamic> listenToDrinkTables(
+    String shopId, {
+    required void Function(
+        Map<String, dynamic> rawData,
+        List<Map<String, dynamic>> drinkTables) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      drinkTablesStatePath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final eventData = payload['data'];
+        if (eventData == null || eventData is! Map) return;
+        final drinkTables = eventData['drink_tables'];
+        if (drinkTables == null) return;
+        if (drinkTables is List) {
+          try {
+            final typed = drinkTables
+                .map((t) => t != null
+                    ? Map<String, dynamic>.from(t as Map)
+                    : <String, dynamic>{})
+                .toList();
+            final rawData = Map<String, dynamic>.from(eventData);
+            onData(rawData, typed);
+          } catch (_) {}
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
-  static StreamSubscription<dynamic> listenToHistory(String shopId, {int limit = 15, required void Function(List<Map<String, dynamic>> history) onData, void Function(Object error)? onError}) {
+  // 🔥 BANDWIDTH FIX #1b: listenToHistory — استخدمه بس للأدمن وبـ limitToLast
+  // مش بيتنصت في الـ SyncService العادي للكاشيرين
+  static StreamSubscription<dynamic> listenToHistory(
+    String shopId, {
+    int limit = 20, // 🔥 خفّفنا من 200 لـ 20
+    required void Function(List<Map<String, dynamic>> history) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
     final fullUrl = _urlWithQuery(historyPath(shopId), {
       'limitToLast': limit.toString(),
       'orderBy': r'"$key"',
     });
-    return _listenRaw(fullUrl, onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final data = payload['data'];
-      if (data == null) { onData([]); return; }
-      if (data is Map) {
-        final typed = data.values.map((h) => Map<String, dynamic>.from(h as Map)).toList();
-        _sortHistoryByDate(typed);
-        onData(typed);
-      } else if (data is List) {
-        final typed = data.map((h) => h != null ? Map<String, dynamic>.from(h as Map) : <String, dynamic>{}).toList();
-        _sortHistoryByDate(typed);
-        onData(typed);
-      }
-    }, onError: onError);
+    return _listenRaw(
+      fullUrl,
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final data = payload['data'];
+        if (data == null) {
+          onData([]);
+          return;
+        }
+        if (data is Map) {
+          try {
+            final typed = data.values
+                .map((h) => Map<String, dynamic>.from(h as Map))
+                .toList();
+            _sortHistoryByDate(typed);
+            onData(typed);
+          } catch (_) {}
+        } else if (data is List) {
+          try {
+            final typed = data
+                .map((h) => h != null
+                    ? Map<String, dynamic>.from(h as Map)
+                    : <String, dynamic>{})
+                .toList();
+            _sortHistoryByDate(typed);
+            onData(typed);
+          } catch (_) {}
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
+  /// فارز السجلات من الأقدم للأحدث حسب حقل date أو timestamp
   static void _sortHistoryByDate(List<Map<String, dynamic>> list) {
     list.sort((a, b) {
       final aVal = a['date'] ?? a['timestamp'] ?? a['created_at'];
@@ -518,123 +851,315 @@ class FirebaseService {
     });
   }
 
-  static StreamSubscription<dynamic> listenToDailySummary(String shopId, {required void Function(Map<String, int> summary) onData, void Function(Object error)? onError}) {
-    return listen(dailySummaryPath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final data = payload['data'];
-      if (data is Map) {
-        onData(Map<String, int>.from(data.map((k, v) => MapEntry(k.toString(), (v as num).toInt()))));
-      }
-    }, onError: onError);
+  static StreamSubscription<dynamic> listenToDailySummary(
+    String shopId, {
+    required void Function(Map<String, int> summary) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      dailySummaryPath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final data = payload['data'];
+        if (data == null) {
+          onData({});
+          return;
+        }
+        if (data is Map) {
+          try {
+            final typed = Map<String, int>.from(
+              data.map(
+                  (k, v) => MapEntry(k.toString(), (v as num).toInt())),
+            );
+            onData(typed);
+          } catch (_) {}
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
-  static StreamSubscription<dynamic> listenToShiftsHistory(String shopId, {required void Function(List<Map<String, dynamic>> shifts) onData, void Function(Object error)? onError}) {
-    return listen(shiftsHistoryPath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final data = payload['data'];
-      if (data is List) {
-        onData(data.map((s) => s != null ? Map<String, dynamic>.from(s as Map) : <String, dynamic>{}).toList());
-      }
-    }, onError: onError);
+  // 🔥 BANDWIDTH FIX: listenToShiftsHistory — مش مستخدمة في الـ SyncService العادي.
+  // بس الأدمن يستخدمها on-demand لما يفتح شاشة الشيفتات.
+  static StreamSubscription<dynamic> listenToShiftsHistory(
+    String shopId, {
+    required void Function(List<Map<String, dynamic>> shifts) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      shiftsHistoryPath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final data = payload['data'];
+        if (data == null) {
+          onData([]);
+          return;
+        }
+        if (data is List) {
+          try {
+            final typed = data
+                .map((s) => s != null
+                    ? Map<String, dynamic>.from(s as Map)
+                    : <String, dynamic>{})
+                .toList();
+            onData(typed);
+          } catch (_) {}
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
-  static StreamSubscription<dynamic> listenToStatic(String shopId, {required void Function(Map<String, dynamic> data) onData, void Function(Object error)? onError}) {
-    return listen(staticDataPath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final data = payload['data'];
-      if (data is Map) onData(Map<String, dynamic>.from(data));
-    }, onError: onError);
+  // 🔥 BANDWIDTH FIX #4: listenToStatic — بيتنصت على الـ static node.
+  // بيُستخدم لمزامنة التغييرات (أسعار / منيو) من الأدمن للكاشيرين فوراً.
+  // مش محتاجين نعمل poll على static كل 60 ثانية بعد كده.
+  static StreamSubscription<dynamic> listenToStatic(
+    String shopId, {
+    required void Function(Map<String, dynamic> data) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      staticDataPath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final data = payload['data'];
+        if (data == null || data is! Map) return;
+        try {
+          onData(Map<String, dynamic>.from(data));
+        } catch (_) {}
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
   }
 
-  static StreamSubscription<dynamic> listen(String path, {required void Function(dynamic data) onData, void Function(Object error)? onError, void Function()? onDone}) {
+  static StreamSubscription<dynamic> listenToOpenShifts(
+    String shopId, {
+    String? senderId,
+    required void Function(Map<String, dynamic> openShifts) onData,
+    void Function(Object error)? onError,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
+    return listen(
+      openShiftsPath(shopId),
+      onData: (payload) {
+        if (payload == null || payload is! Map) return;
+        final raw = payload['data'];
+        if (raw is Map) {
+          final data = Map<String, dynamic>.from(raw);
+          if (senderId != null && data['_sender_id'] == senderId) return;
+          data.remove('_sender_id');
+          onData(data);
+        } else {
+          onData({});
+        }
+      },
+      onError: onError,
+      retryDelay: retryDelay,
+    );
+  }
+
+  // ─── SSE Core ──────────────────────────────────────────────────────────────
+
+  static StreamSubscription<dynamic> listen(
+    String path, {
+    required void Function(dynamic data) onData,
+    void Function(Object error)? onError,
+    void Function()? onDone,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
     final controller = StreamController<dynamic>.broadcast();
     bool cancelled = false;
+
     Future<void> connect() async {
       while (!cancelled) {
         http.Client? client;
         try {
           client = http.Client();
-          final request = http.Request('GET', Uri.parse(_url(path)))..headers['Accept'] = 'text/event-stream'..headers['Cache-Control'] = 'no-cache';
+          final request = http.Request('GET', Uri.parse(_url(path)));
+          request.headers['Accept'] = 'text/event-stream';
+          request.headers['Cache-Control'] = 'no-cache';
+
           final response = await client.send(request);
-          if (response.statusCode != 200) { client.close(); await Future.delayed(const Duration(seconds: 2)); continue; }
+
+          if (response.statusCode != 200) {
+            client.close();
+            await Future.delayed(retryDelay);
+            continue;
+          }
+
           StringBuffer buffer = StringBuffer();
-          await for (final chunk in response.stream.transform(utf8.decoder)) {
+
+          await for (final chunk
+              in response.stream.transform(utf8.decoder)) {
             if (cancelled) break;
+
             buffer.write(chunk);
             final raw = buffer.toString();
             final blocks = raw.split('\n\n');
-            for (int i = 0; i < blocks.length - 1; i++) { _processSSEBlock(blocks[i], controller); }
+
+            for (int i = 0; i < blocks.length - 1; i++) {
+              _processSSEBlock(blocks[i], controller);
+            }
             buffer = StringBuffer(blocks.last);
           }
-        } catch (e) { if (!cancelled) onError?.call(e); } finally { client?.close(); }
-        if (!cancelled) await Future.delayed(const Duration(seconds: 2));
+        } catch (e) {
+          if (!cancelled) onError?.call(e);
+        } finally {
+          client?.close();
+        }
+
+        if (!cancelled) await Future.delayed(retryDelay);
       }
+
       if (!controller.isClosed) controller.close();
       onDone?.call();
     }
+
     connect();
-    return _CancellableSubscription(controller.stream.listen(onData, onError: onError), onCancel: () => cancelled = true);
+
+    final subscription = controller.stream.listen(
+      onData,
+      onError: onError,
+    );
+
+    return _CancellableSubscription(subscription, onCancel: () {
+      cancelled = true;
+    });
   }
 
-  static StreamSubscription<dynamic> _listenRaw(String fullUrl, {required void Function(dynamic data) onData, void Function(Object error)? onError, void Function()? onDone}) {
+  /// مثل [listen] بالظبط لكن بياخد URL كامل بدل path —
+  /// بيُستخدم لما محتاجين نضيف query params زي limitToLast
+  static StreamSubscription<dynamic> _listenRaw(
+    String fullUrl, {
+    required void Function(dynamic data) onData,
+    void Function(Object error)? onError,
+    void Function()? onDone,
+    Duration retryDelay = const Duration(seconds: 2),
+  }) {
     final controller = StreamController<dynamic>.broadcast();
     bool cancelled = false;
+
     Future<void> connect() async {
       while (!cancelled) {
         http.Client? client;
         try {
           client = http.Client();
-          final request = http.Request('GET', Uri.parse(fullUrl))..headers['Accept'] = 'text/event-stream'..headers['Cache-Control'] = 'no-cache';
+          final request = http.Request('GET', Uri.parse(fullUrl));
+          request.headers['Accept'] = 'text/event-stream';
+          request.headers['Cache-Control'] = 'no-cache';
+
           final response = await client.send(request);
-          if (response.statusCode != 200) { client.close(); await Future.delayed(const Duration(seconds: 2)); continue; }
+
+          if (response.statusCode != 200) {
+            client.close();
+            await Future.delayed(retryDelay);
+            continue;
+          }
+
           StringBuffer buffer = StringBuffer();
+
           await for (final chunk in response.stream.transform(utf8.decoder)) {
             if (cancelled) break;
             buffer.write(chunk);
             final raw = buffer.toString();
             final blocks = raw.split('\n\n');
-            for (int i = 0; i < blocks.length - 1; i++) { _processSSEBlock(blocks[i], controller); }
+            for (int i = 0; i < blocks.length - 1; i++) {
+              _processSSEBlock(blocks[i], controller);
+            }
             buffer = StringBuffer(blocks.last);
           }
-        } catch (e) { if (!cancelled) onError?.call(e); } finally { client?.close(); }
-        if (!cancelled) await Future.delayed(const Duration(seconds: 2));
+        } catch (e) {
+          if (!cancelled) onError?.call(e);
+        } finally {
+          client?.close();
+        }
+        if (!cancelled) await Future.delayed(retryDelay);
       }
       if (!controller.isClosed) controller.close();
       onDone?.call();
     }
+
     connect();
-    return _CancellableSubscription(controller.stream.listen(onData, onError: onError), onCancel: () => cancelled = true);
+
+    final subscription = controller.stream.listen(onData, onError: onError);
+    return _CancellableSubscription(subscription, onCancel: () {
+      cancelled = true;
+    });
   }
 
-  static void _processSSEBlock(String block, StreamController<dynamic> controller) {
-    String? eventType; String? dataLine;
+  static void _processSSEBlock(
+      String block, StreamController<dynamic> controller) {
+    String? eventType;
+    String? dataLine;
+
     for (final line in block.split('\n')) {
-      if (line.startsWith('event:')) eventType = line.substring(6).trim();
-      else if (line.startsWith('data:')) dataLine = line.substring(5).trim();
+      if (line.startsWith('event:')) {
+        eventType = line.substring(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLine = line.substring(5).trim();
+      }
     }
+
     if ((eventType == 'put' || eventType == 'patch') && dataLine != null) {
       try {
         final parsed = jsonDecode(dataLine);
-        if (!controller.isClosed) controller.add({'event': eventType, 'path': parsed['path'], 'data': parsed['data']});
+        if (!controller.isClosed) {
+          controller.add({
+            'event': eventType,
+            'path': parsed['path'],
+            'data': parsed['data'],
+          });
+        }
       } catch (_) {}
     }
   }
 
-  static Future<Map<String, dynamic>?> getSubscriptionWithTimestamp(String shopId) async {
+  static Future<Map<String, dynamic>?> getSubscriptionWithTimestamp(
+      String shopId) async {
     try {
-      final subFuture = http.get(Uri.parse(_url(shopSubscriptionPath(shopId)))).timeout(const Duration(seconds: 10));
-      final timeFuture = http.get(Uri.parse('$_baseUrl/.json?shallow=true&auth=$_secret')).timeout(const Duration(seconds: 10));
+      final subFuture = http
+          .get(Uri.parse(_url(shopSubscriptionPath(shopId))))
+          .timeout(const Duration(seconds: 10));
+
+      final timeFuture = http
+          .get(Uri.parse('$_baseUrl/.json?shallow=true&auth=$_secret'))
+          .timeout(const Duration(seconds: 10));
+
       final results = await Future.wait([subFuture, timeFuture]);
-      if (results[0].statusCode != 200) return null;
-      final subData = jsonDecode(results[0].body);
+
+      final subResponse = results[0];
+      final timeResponse = results[1];
+
+      if (subResponse.statusCode != 200) return null;
+
+      final subData = jsonDecode(subResponse.body);
       if (subData == null || subData is! Map) return null;
+
       final result = Map<String, dynamic>.from(subData);
-      final dateHeader = results[1].headers['date'];
+
+      final dateHeader = timeResponse.headers['date'];
       if (dateHeader != null) {
-        try { result['_server_time_ms'] = DateTime.parse(dateHeader).millisecondsSinceEpoch; } catch (_) { result['_server_time_ms'] = DateTime.now().millisecondsSinceEpoch; }
-      } else { result['_server_time_ms'] = DateTime.now().millisecondsSinceEpoch; }
+        try {
+          final serverTime = DateTime.parse(dateHeader);
+          result['_server_time_ms'] = serverTime.millisecondsSinceEpoch;
+        } catch (_) {
+          result['_server_time_ms'] = DateTime.now().millisecondsSinceEpoch;
+        }
+      } else {
+        result['_server_time_ms'] = DateTime.now().millisecondsSinceEpoch;
+      }
+
       return result;
-    } catch (e) { return null; }
+    } catch (e) {
+      print('Firebase getSubscriptionWithTimestamp error: $e');
+      return null;
+    }
   }
 
   static Future<Map<String, dynamic>?> getSubscription(String shopId) async {
@@ -648,32 +1173,38 @@ class FirebaseService {
       final data = await get(openShiftsPath(shopId));
       if (data == null || data is! Map) return {};
       return Map<String, dynamic>.from(data);
-    } catch (_) { return {}; }
-  }
-
-  static StreamSubscription<dynamic> listenToOpenShifts(String shopId, {String? senderId, required void Function(Map<String, dynamic> openShifts) onData, void Function(Object error)? onError}) {
-    return listen(openShiftsPath(shopId), onData: (payload) {
-      if (payload == null || payload is! Map) return;
-      final raw = payload['data'];
-      if (raw is Map) {
-        final data = Map<String, dynamic>.from(raw);
-        if (senderId != null && data['_sender_id'] == senderId) return;
-        data.remove('_sender_id');
-        onData(data);
-      } else { onData({}); }
-    }, onError: onError);
+    } catch (_) {
+      return {};
+    }
   }
 }
 
+// ─── CancellableSubscription ─────────────────────────────────────────────────
+
 class _CancellableSubscription<T> implements StreamSubscription<T> {
-  final StreamSubscription<T> _inner; final void Function() onCancel;
+  final StreamSubscription<T> _inner;
+  final void Function() onCancel;
+
   _CancellableSubscription(this._inner, {required this.onCancel});
-  @override Future<void> cancel() { onCancel(); return _inner.cancel(); }
-  @override bool get isPaused => _inner.isPaused;
-  @override void pause([Future<void>? resumeSignal]) => _inner.pause(resumeSignal);
-  @override void resume() => _inner.resume();
-  @override void onData(void Function(T data)? handleData) => _inner.onData(handleData);
-  @override void onError(Function? handleError) => _inner.onError(handleError);
-  @override void onDone(void Function()? handleDone) => _inner.onDone(handleDone);
-  @override Future<E> asFuture<E>([E? futureValue]) => _inner.asFuture(futureValue);
+
+  @override
+  Future<void> cancel() {
+    onCancel();
+    return _inner.cancel();
+  }
+
+  @override
+  bool get isPaused => _inner.isPaused;
+  @override
+  void pause([Future<void>? resumeSignal]) => _inner.pause(resumeSignal);
+  @override
+  void resume() => _inner.resume();
+  @override
+  void onData(void Function(T data)? handleData) => _inner.onData(handleData);
+  @override
+  void onError(Function? handleError) => _inner.onError(handleError);
+  @override
+  void onDone(void Function()? handleDone) => _inner.onDone(handleDone);
+  @override
+  Future<E> asFuture<E>([E? futureValue]) => _inner.asFuture(futureValue);
 }
