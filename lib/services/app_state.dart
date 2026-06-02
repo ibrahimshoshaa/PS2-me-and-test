@@ -209,8 +209,9 @@ void _checkCountdownAlert(PSDevice d) {
   // ══════════════════════════════════════════════════════════════════════════
   // SYNC
   // ══════════════════════════════════════════════════════════════════════════
-
+DateTime? _syncStartTime;
   void _startSync() {
+   _syncStartTime = DateTime.now();
     _sync?.dispose();
     _sync = SyncService(
       shopId: shopId!,
@@ -288,18 +289,32 @@ onRemoteDrinkTables: (rawData, remoteDrinkTables) {
 
     // كل 5 ثواني نتحقق: هل الـ SSE شغال؟
     // لو آخر SSE event أكتر من 30 ثانية → الـ SSE ممكن يكون وقع → poll
-    _historyPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      final now = DateTime.now();
-      final lastEvent = _lastSseEvent;
-      final sseStale = lastEvent == null ||
-          now.difference(lastEvent).inSeconds > 30;
+    // من
+_historyPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+  final now = DateTime.now();
+  final lastEvent = _lastSseEvent;
+  final sseStale = lastEvent == null ||
+      now.difference(lastEvent).inSeconds > 30;
 
-      if (sseStale && !archiving) {
-        _sseConnected = false;
-        _pollAll();
-      }
-    });
+  if (sseStale && !archiving) {
+    _sseConnected = false;
+    _pollAll();
+  }
+});
 
+// إلى
+_historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+  final appJustStarted = _syncStartTime != null &&
+      DateTime.now().difference(_syncStartTime!).inSeconds < 60;
+  if (appJustStarted) return;
+
+  final sseStale = _lastSseEvent == null ||
+      DateTime.now().difference(_lastSseEvent!).inSeconds > 60;
+  if (sseStale && !archiving) {
+    _sseConnected = false;
+    _pollAll();
+  }
+});
     // Heartbeat: كل 60 ثانية poll واحد بغض النظر — للـ static data والـ shifts
     _fallbackPollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       if (!archiving) _pollStaticFallback();
