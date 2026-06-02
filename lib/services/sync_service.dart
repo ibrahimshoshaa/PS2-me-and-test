@@ -5,7 +5,7 @@ import 'firebase_service.dart';
 
 typedef DataMap = Map<String, dynamic>;
 
-class SyncCallbacks {
+class SyncCallbacks { 
   final void Function(
     Map<String, dynamic> rawData,
     List<Map<String, dynamic>> devices,
@@ -56,14 +56,12 @@ class SyncService {
   final String senderId;
 
   StreamSubscription? _openShiftsSSE;
+  StreamSubscription? _historySSE;
   Timer? _debounceTimer;
   StreamSubscription? _devicesSSE;
   StreamSubscription? _tablesSSE;
   StreamSubscription? _drinkTablesSSE;
   StreamSubscription? _staticSSE;
-  StreamSubscription? _historySSE;
-  StreamSubscription? _dailySummarySSE;
-  StreamSubscription? _shiftsHistorySSE;
 
   bool _paused = false;
   bool _disposed = false;
@@ -88,9 +86,28 @@ class SyncService {
     _startDrinkTablesSSE();
     _startStaticSSE();
     _startOpenShiftsSSE();
-    _startHistorySSE();
-    _startDailySummarySSE();
-    _startShiftsHistorySSE();
+    // history: لا SSE هنا — بتشتغل بس لما الأدمن يسجل دخول عبر startHistorySSE()
+  }
+
+  /// بيشتغل بس لما الأدمن يسجل دخول — الكاشير مش محتاج يشوف السجل لحظياً
+  void startHistorySSE() {
+    if (_disposed) return;
+    _historySSE?.cancel();
+    _historySSE = FirebaseService.listenToHistory(
+      shopId,
+      onData: (history) {
+        if (_disposed || _paused) return;
+        callbacks.onRemoteHistory(history);
+      },
+      onError: (_) {},
+      retryDelay: const Duration(seconds: 2),
+    );
+  }
+
+  /// بيتوقف لما الأدمن يخرج
+  void stopHistorySSE() {
+    _historySSE?.cancel();
+    _historySSE = null;
   }
 
   void _startOpenShiftsSSE() {
@@ -107,18 +124,6 @@ class SyncService {
     );
   }
 
-  void _startShiftsHistorySSE() {
-    _shiftsHistorySSE?.cancel();
-    _shiftsHistorySSE = FirebaseService.listenToShiftsHistory(
-      shopId,
-      onData: (shifts) {
-        if (_disposed || _paused) return;
-        callbacks.onRemoteShiftsHistory(shifts);
-      },
-      onError: (_) {},
-      retryDelay: const Duration(seconds: 2),
-    );
-  }
 
   void pause() => _paused = true;
 
@@ -134,10 +139,8 @@ class SyncService {
     _drinkTablesSSE?.cancel();
     _staticSSE?.cancel();
     _openShiftsSSE?.cancel();
-    _debounceTimer?.cancel();
     _historySSE?.cancel();
-    _dailySummarySSE?.cancel();
-    _shiftsHistorySSE?.cancel();
+    _debounceTimer?.cancel();
   }
 
   void _startDevicesSSE() {
@@ -192,31 +195,7 @@ class SyncService {
     );
   }
 
-  void _startHistorySSE() {
-    _historySSE?.cancel();
-    _historySSE = FirebaseService.listenToHistory(
-      shopId,
-      onData: (history) {
-        if (_disposed || _paused) return;
-        callbacks.onRemoteHistory(history);
-      },
-      onError: (_) {},
-      retryDelay: const Duration(seconds: 2),
-    );
-  }
 
-  void _startDailySummarySSE() {
-    _dailySummarySSE?.cancel();
-    _dailySummarySSE = FirebaseService.listenToDailySummary(
-      shopId,
-      onData: (summary) {
-        if (_disposed || _paused) return;
-        callbacks.onRemoteDailySummary(summary);
-      },
-      onError: (_) {},
-      retryDelay: const Duration(seconds: 2),
-    );
-  }
 
   Future<void> pushDevices() async {
     if (_paused || _disposed) {
@@ -251,19 +230,7 @@ class SyncService {
     _scheduleDebounce();
   }
 
-  Future<void> pushHistory() async {
-    if (_paused || _disposed) {
-      _pendingHistory = true;
-      return;
-    }
-    _pendingHistory = false;
-    try {
-      final history = callbacks.buildHistory();
-      await FirebaseService.pushHistory(shopId, history);
-    } catch (_) {
-      _pendingHistory = true;
-    }
-  }
+
 
   Future<void> pushSingleHistory(Map<String, dynamic> record) async {
     if (_paused || _disposed) return;
@@ -295,7 +262,7 @@ class SyncService {
     if (_pendingDevices) await pushDevices();
     if (_pendingTables) await _pushTables();
     if (_pendingStatic) await _pushStatic();
-    if (_pendingHistory) await pushHistory();
+    if (_pendingHistory) await pushSingleHistory(callbacks.buildHistory().isNotEmpty ? callbacks.buildHistory().last : {});
     if (_pendingShifts) await _pushShifts();
     if (_pendingDebts) await _pushDebts();
     if (_pendingTournaments) await _pushTournaments();
