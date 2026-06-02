@@ -162,14 +162,16 @@ static const String _defaultHistoryHash =
 
   void _startClock() {
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      bool anyActive = false;
       for (var d in devices) {
         if (d.isActive) {
+          anyActive = true;
           d.updateTimer();
           _checkTimerAlert(d);
           _checkCountdownAlert(d);
         }
       }
-      notifyListeners();
+      if (anyActive) notifyListeners();
     });
   }
 
@@ -283,26 +285,9 @@ onRemoteDrinkTables: (rawData, remoteDrinkTables) {
     _sync!.start();
 
     // ✅ Polling ذكي — بيشتغل بس لما الـ SSE ينقطع
-    // الـ SSE هو الأساسي، والـ polling مجرد safety net
     _historyPollTimer?.cancel();
     _fallbackPollTimer?.cancel();
 
-    // كل 5 ثواني نتحقق: هل الـ SSE شغال؟
-    // لو آخر SSE event أكتر من 30 ثانية → الـ SSE ممكن يكون وقع → poll
-    // من
-_historyPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-  final now = DateTime.now();
-  final lastEvent = _lastSseEvent;
-  final sseStale = lastEvent == null ||
-      now.difference(lastEvent).inSeconds > 30;
-
-  if (sseStale && !archiving) {
-    _sseConnected = false;
-    _pollAll();
-  }
-});
-
-// إلى
 _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
   final appJustStarted = _syncStartTime != null &&
       DateTime.now().difference(_syncStartTime!).inSeconds < 60;
@@ -317,7 +302,7 @@ _historyPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
 });
     // Heartbeat: كل 60 ثانية poll واحد بغض النظر — للـ static data والـ shifts
     _fallbackPollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
-      if (!archiving) _pollStaticFallback();
+      if (!archiving && !_sseConnected) _pollStaticFallback();
     });
   }
 
@@ -837,6 +822,15 @@ Future<void> _restoreOpenShiftFromFirebase() async {
     if (local != null) {
       _applyData(local);
       notifyListeners();
+      // لو عندنا cache محلي حديث (أقل من 5 دقايق) مش محتاجين pull كامل
+      final lastUpdated = local['last_updated'] as int?;
+      if (lastUpdated != null) {
+        final age = DateTime.now().millisecondsSinceEpoch - lastUpdated;
+        if (age < 5 * 60 * 1000) {
+          _startSync();
+          return;
+        }
+      }
     }
 
     try {
@@ -1158,7 +1152,7 @@ if (rechargeTxRaw != null) {
     actionDetails: 'أضاف مصروف "$title" ($category) بمبلغ ${amount.toStringAsFixed(1)} ج',
     extra: {'title': title, 'amount': amount, 'category': category},
   );
-  _pushExpenses();
+  _pushStaticOnly();
   notifyListeners();
 }
  
@@ -1171,7 +1165,7 @@ void deleteExpense(String id) {
     action: AuditAction.expenseDeleted,
     actionDetails: 'حذف مصروف "${exp['title'] ?? ''}"',
   );
-  _pushExpenses();
+  _pushStaticOnly();
   notifyListeners();
 }
  
@@ -1191,7 +1185,7 @@ void updateExpense(String id, String title, double amount,
     action: AuditAction.expenseUpdated,
     actionDetails: 'عدّل مصروف "$title" ($category) — ${amount.toStringAsFixed(1)} ج',
   );
-  _pushExpenses();
+  _pushStaticOnly();
   notifyListeners();
 }
  
@@ -1209,15 +1203,7 @@ void removeExpenseCategory(String name) {
   _pushStaticOnly();  // كان saveData()
   notifyListeners();
 }
- // Helper — رفع المصروفات فوراً للـ Firebase
-Future<void> _pushExpenses() async {
-  if (shopId == null) return;
-  await FirebaseService.pushStaticData(shopId!, _buildStaticData());
-  final data = _buildDataDict();
-  await SyncService.saveLocal(shopId!, data);
-}
-
-// Helper — رفع الـ static فقط (أسعار / ديون / إعدادات)
+ // Helper — رفع الـ static فقط (أسعار / ديون / إعدادات / مصروفات)
 Future<void> _pushStaticOnly() async {
   if (shopId == null) return;
   await FirebaseService.pushStaticData(shopId!, _buildStaticData());
@@ -1239,11 +1225,8 @@ Future<void> _saveTournaments() async {
 
   Future<void> saveData() async {
     if (shopId == null) return;
-    final data = _buildDataDict();
-    await SyncService.saveLocal(shopId!, data);
-    // ✅ بعت الـ static فوراً (أسعار، منيو، إعدادات) عبر SSE
+    await SyncService.saveLocal(shopId!, _buildDataDict());
     await FirebaseService.pushStaticData(shopId!, _buildStaticData());
-    _sync?.schedulePushStatic();
   }
 
   Future<void> _saveDevices({int? deviceId}) async {
@@ -1253,26 +1236,20 @@ Future<void> _saveTournaments() async {
     await _sync?.pushDevices();
   }
 
-Future<void> _saveTables({int? tableIndex}) async {
+Future<void> _saveTables({int? tableIndex, bool tablesChanged = true, bool drinkTablesChanged = false}) async {
   if (shopId == null) return;
-  final data = _buildDataDict();
-  await SyncService.saveLocal(shopId!, data);
-  await Future.wait([
-    FirebaseService.pushTablesState(shopId!, tables, _myDeviceId),
-    FirebaseService.pushDrinkTablesState(shopId!, drinkTables, _myDeviceId),
-  ]);
+  await SyncService.saveLocal(shopId!, _buildDataDict());
+  final futures = <Future>[];
+  if (tablesChanged) futures.add(FirebaseService.pushTablesState(shopId!, tables, _myDeviceId));
+  if (drinkTablesChanged) futures.add(FirebaseService.pushDrinkTablesState(shopId!, drinkTables, _myDeviceId));
+  if (futures.isNotEmpty) await Future.wait(futures);
   _sync?.schedulePushTables();
 }
 
   Future<void> _saveHistory() async {
     if (shopId == null) return;
-    final data = _buildDataDict();
-    await SyncService.saveLocal(shopId!, data);
-    // ✅ بعت السجلات فوراً
-    await Future.wait([
-      FirebaseService.pushHistory(shopId!, history),
-      _sync?.pushHistory() ?? Future.value(),
-    ]);
+    await SyncService.saveLocal(shopId!, _buildDataDict());
+    await FirebaseService.pushHistory(shopId!, history);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2072,19 +2049,19 @@ void startTable(int index, {
 
  void addDrinkTable(String name) {
   drinkTables.add({'name': name, 'orders': <String, int>{}});
-  _saveTables();  // ✅ كان saveData()
+  _saveTables(drinkTablesChanged: true);
   notifyListeners();
 }
 
 void removeDrinkTable(int index) {
   drinkTables.removeAt(index);
-  _saveTables();  // ✅ كان saveData()
+  _saveTables(drinkTablesChanged: true);
   notifyListeners();
 }
 
 void updateDrinkTableName(int index, String name) {
   drinkTables[index]['name'] = name;
-  _saveTables();  // ✅ كان saveData()
+  _saveTables(drinkTablesChanged: true);
   notifyListeners();
 }
 
@@ -2116,14 +2093,14 @@ void updateDrinkTableName(int index, String name) {
       extra: {'table_name': dtName, 'item': item, 'qty': qty},
     );
 
-    _saveTables();
+    _saveTables(tablesChanged: false, drinkTablesChanged: true);
     notifyListeners();
     return null;
   }
 
  void setDrinkTableOrders(int index, Map<String, int> orders) {
   drinkTables[index]['orders'] = orders;
-  _saveTables();
+  _saveTables(tablesChanged: false, drinkTablesChanged: true);
   notifyListeners();
 }
  
@@ -2178,7 +2155,7 @@ void updateDrinkTableName(int index, String name) {
     drinkTables[index]['orders'] = <String, int>{};
     _checkoutDrinkTables.remove(index);
 
-    _saveTables();
+    _saveTables(tablesChanged: false, drinkTablesChanged: true);
     _saveHistory();
     notifyListeners();
     return record;
@@ -2201,7 +2178,7 @@ void updateDrinkTableName(int index, String name) {
       device.orders[item] = (device.orders[item] ?? 0) + qty;
     });
     drinkTables[drinkIndex]['orders'] = <String, int>{};
-    _saveTables();
+    _saveTables(tablesChanged: false, drinkTablesChanged: true);
     _saveDevices();
     notifyListeners();
   }
@@ -2213,7 +2190,7 @@ void updateDrinkTableName(int index, String name) {
     device.orders[item] = (device.orders[item] ?? 0) + qty;
   });
   drinkTables[drinkIndex]['orders'] = <String, int>{};
-  _saveTables();
+  _saveTables(tablesChanged: false, drinkTablesChanged: true);
   _saveDevices();
   notifyListeners();
 }
@@ -2253,7 +2230,7 @@ Future<void> transferDrinkTableOrdersToTable(int drinkIndex, int tableIndex) asy
     });
     tables[tableIndex]['orders'] = existing;
     drinkTables[drinkIndex]['orders'] = <String, int>{};
-    _saveTables();
+    _saveTables(tablesChanged: true, drinkTablesChanged: true);
     notifyListeners();
   }
 
@@ -2318,17 +2295,7 @@ Future<void> removeMenuItem(String name) async {
       inventory[item] = (inventory[item]! - qty).clamp(0, 99999);
     }
     dailyInventorySummary[item] = (dailyInventorySummary[item] ?? 0) + qty;
-    // ✅ بعت الـ inventory محدّث فوراً للـ Firebase
-    if (shopId != null) {
-      FirebaseService.set(
-        FirebaseService.inventoryPath(shopId!),
-        inventory,
-      );
-      FirebaseService.set(
-        FirebaseService.dailySummaryPath(shopId!),
-        dailyInventorySummary,
-      );
-    }
+    // الـ push بيتم عبر _saveHistory أو _saveTables اللي بيتستدعوا بعدها
   }
 
   void addInventory(String item, int qty) {
