@@ -95,12 +95,9 @@ class SyncService {
     _historySSE?.cancel();
     _historySSE = FirebaseService.listenToHistory(
       shopId,
-      limit: 1, // 🔥 بس آخر ريكورد جديد — الباقي عبر fetchHistoryOnDemand
       onData: (history) {
         if (_disposed || _paused) return;
-        if (history.isNotEmpty) {
-          callbacks.onRemoteHistory(history);
-        }
+        callbacks.onRemoteHistory(history);
       },
       onError: (_) {},
       retryDelay: const Duration(seconds: 2),
@@ -217,7 +214,10 @@ class SyncService {
   Future<void> pushSingleDevice(int deviceIndex, Map<String, dynamic> deviceData) async {
     if (_paused || _disposed) return;
     try {
-      await FirebaseService.pushSingleDeviceState(shopId, deviceIndex, deviceData, senderId);
+      // 🔥 FIX: بدل patch على جهاز واحد، نبعت كل الأجهزة بـ set
+      // عشان Firebase SSE يبعت path=/ والموبايلات التانية تستقبل التغيير فوراً
+      final allDevices = callbacks.buildDevicesState();
+      await FirebaseService.pushDevicesStateSlim(shopId, allDevices, senderId);
     } catch (_) {
       _pendingDevices = true; 
     }
