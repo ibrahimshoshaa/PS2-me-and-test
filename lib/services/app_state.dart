@@ -260,7 +260,13 @@ void _startClock() {
         onRemoteDevices: (rawData, remoteDevices) {
           if (rawData['sender_id'] == _myDeviceId) return;
           _markSseAlive();
-          _mergeRemoteDevices(remoteDevices);
+          // 🔥 FIX: لو جاي جهاز واحد بس (partial patch) — merge جزئي
+          final singleIdx = rawData['single_device_index'] as int?;
+          if (singleIdx != null && remoteDevices.length == 1) {
+            _mergeSingleDevice(remoteDevices.first);
+          } else {
+            _mergeRemoteDevices(remoteDevices);
+          }
           notifyListeners();
         },
         onRemoteTables: (rawData, remoteTables) {
@@ -612,6 +618,19 @@ void _startClock() {
         newDevice.updateTimer();
         devices.add(newDevice);
       }
+    }
+  }
+
+  // 🔥 FIX: merge جهاز واحد بس بدون ما نمسح باقي الأجهزة
+  void _mergeSingleDevice(Map<String, dynamic> remoteJson) {
+    final remoteId = (remoteJson['id'] as num?)?.toInt() ?? 0;
+    final idx = devices.indexWhere((d) => d.id == remoteId);
+    if (idx != -1) {
+      final localLog = devices[idx].sessionLog;
+      final updated = PSDevice.fromJson(remoteJson, remoteId);
+      updated.sessionLog = localLog;
+      updated.updateTimer();
+      devices[idx] = updated;
     }
   }
 
