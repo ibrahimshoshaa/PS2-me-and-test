@@ -1337,6 +1337,7 @@ void _startClock() {
     } else {
       await _sync?.pushDevices();
     }
+    _pushSummary(); // 🔥 حدّث active_devices في summary عند كل تغيير في الأجهزة
   }
 
   Future<void> _saveSingleHistoryRecord(
@@ -1344,6 +1345,7 @@ void _startClock() {
     if (shopId == null) return;
     await SyncService.saveLocal(shopId!, _buildDataDict());
     await _sync?.pushSingleHistory(newRecord);
+    _pushSummary(); // 🔥 حدّث summary node بعد كل سجل جديد
   }
 
   Future<void> _saveTables({
@@ -1364,6 +1366,7 @@ void _startClock() {
     }
     if (futures.isNotEmpty) await Future.wait(futures);
     _sync?.schedulePushTables();
+    _pushSummary(); // 🔥 حدّث summary عند أي تغيير في التربيزات
   }
 
   Future<void> _saveHistory() async {
@@ -1378,6 +1381,46 @@ void _startClock() {
     if (shopId == null) return;
     await FirebaseService.pushStaticData(shopId!, _buildStaticData());
     await SyncService.saveLocal(shopId!, _buildDataDict());
+  }
+
+  // 🔥 SUMMARY NODE: يكتب ملخص الإيرادات في realtime/summary
+  // الـ Worker يقرأ منها بدل جلب records/history كاملة (توفير 95% bandwidth)
+  Future<void> _pushSummary() async {
+    if (shopId == null) return;
+    try {
+      final totalTime   = history.fold(0.0, (s, h) => s + ((h['time_cost']   as num?)?.toDouble() ?? 0));
+      final totalBuffet = history.fold(0.0, (s, h) => s + ((h['buffet_cost'] as num?)?.toDouble() ?? 0));
+      final rechargeRev = history
+          .where((h) => h['device_type'] == 'recharge')
+          .fold(0.0, (s, h) => s + ((h['total'] as num?)?.toDouble() ?? 0));
+      final activeCount = devices.where((d) => d.isActive).length;
+
+      // أعلى كاشير
+      final cashierMap = <String, double>{};
+      for (final r in history) {
+        final c = r['cashier']?.toString();
+        if (c != null) cashierMap[c] = (cashierMap[c] ?? 0) + ((r['total'] as num?)?.toDouble() ?? 0);
+      }
+      String topCashier = '—';
+      if (cashierMap.isNotEmpty) {
+        final top = cashierMap.entries.reduce((a, b) => a.value >= b.value ? a : b);
+        topCashier = '${top.key} (${top.value.toStringAsFixed(1)} ج)';
+      }
+
+      await FirebaseService.set(
+        'shops/$shopId/realtime/summary',
+        {
+          'total_revenue':   totalTime + totalBuffet,
+          'game_revenue':    totalTime,
+          'buffet_revenue':  totalBuffet,
+          'recharge_revenue': rechargeRev,
+          'sessions_count':  history.length,
+          'active_devices':  activeCount,
+          'top_cashier':     topCashier,
+          'last_updated':    DateTime.now().toIso8601String(),
+        },
+      );
+    } catch (_) {}
   }
 
   Future<void> _saveTournaments() async {
