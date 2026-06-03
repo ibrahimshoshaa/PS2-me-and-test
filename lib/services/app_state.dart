@@ -416,18 +416,22 @@ void _startClock() {
       // ── حالة الأجهزة ──────────────────────────────────────────────────────
       final remoteDevicesData = results[2];
       if (remoteDevicesData != null && remoteDevicesData is Map) {
-        final devices = remoteDevicesData['devices'];
-        if (devices is List) {
-          final typed = devices
-              .map((d) {
-                if (d == null) return <String, dynamic>{};
-                final copy = Map<String, dynamic>.from(d as Map);
-                copy.remove('session_log'); // 🔥 شيل session_log دايماً
-                return copy;
-              })
-              .toList();
-          _mergeRemoteDevices(typed);
-          changed = true;
+        // 🔥 FIX: لو احنا اللي بعتنا التغيير ده — متعملش merge
+        final devSenderId = remoteDevicesData['sender_id']?.toString();
+        if (devSenderId != _myDeviceId) {
+          final devices = remoteDevicesData['devices'];
+          if (devices is List) {
+            final typed = devices
+                .map((d) {
+                  if (d == null) return <String, dynamic>{};
+                  final copy = Map<String, dynamic>.from(d as Map);
+                  copy.remove('session_log'); // 🔥 شيل session_log دايماً
+                  return copy;
+                })
+                .toList();
+            _mergeRemoteDevices(typed);
+            changed = true;
+          }
         }
       }
 
@@ -661,7 +665,13 @@ void _startClock() {
           Map<String, String>.from(s['menu_item_categories']);
     }
     if (s['inventory'] != null) {
-      inventory = Map<String, int>.from(s['inventory']);
+      final remoteInv = Map<String, int>.from(s['inventory']);
+      // 🔥 FIX: بس أضف أصناف جديدة — لا تكتب فوق الكميات الموجودة محلياً
+      for (final entry in remoteInv.entries) {
+        inventory.putIfAbsent(entry.key, () => entry.value);
+      }
+      // أضف أصناف موجودة في remote بس مش في local
+      inventory.removeWhere((k, _) => !remoteInv.containsKey(k));
     }
     if (s['cashiers'] != null) {
       cashiers = List<Map<String, dynamic>>.from(
@@ -1656,6 +1666,7 @@ void _startClock() {
     }
 
     _stoppingDevices.add(d.id);
+    try {
     _logEvent(d, 'stop', note: 'انتهت الجلسة');
     final timePrice = d.isActive ? d.calculateTimePrice(prices) : 0.0;
     final buffetPrice = d.getBuffetPrice(menu);
@@ -1728,7 +1739,9 @@ void _startClock() {
     d.sessionLog = []; // 🔥 امسح الـ local log بعد الحفظ
     _alertedDevices.remove(d.id);
     _countdownAlertedDevices.remove(d.id);
-    _stoppingDevices.remove(d.id);
+    } finally {
+      _stoppingDevices.remove(d.id);
+    }
     _saveDevices(deviceId: d.id);
     _saveSingleHistoryRecord(record);
     notifyListeners();
