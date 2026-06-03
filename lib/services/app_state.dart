@@ -195,7 +195,7 @@ class AppState extends ChangeNotifier {
   // CLOCK
   // ══════════════════════════════════════════════════════════════════════════
 
-  void _startClock() {
+void _startClock() {
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       bool anyActive = false;
       for (var d in devices) {
@@ -206,7 +206,8 @@ class AppState extends ChangeNotifier {
           _checkCountdownAlert(d);
         }
       }
-      if (anyActive) notifyListeners();
+      // دايماً notify عشان الـ UI يتحدث فوراً بعد أي تغيير
+      notifyListeners();
     });
   }
 
@@ -1427,6 +1428,7 @@ class AppState extends ChangeNotifier {
         'startTime': DateTime.now().toIso8601String(),
       });
     }
+    d.updateTimer();
     notifyListeners();
   }
 
