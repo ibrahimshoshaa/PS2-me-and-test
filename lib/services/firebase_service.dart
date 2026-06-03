@@ -698,8 +698,29 @@ class FirebaseService {
         final eventPath = payload['path'] as String?;
         final eventData = payload['data'];
 
-        if (eventPath != null && eventPath.startsWith('/devices/')) {
-          // partial patch — re-fetch لو محتاج full state
+        // 🔥 FIX: partial patch من pushSingleDeviceState
+        // Firebase بيبعت path = '/devices/3' مش '/'
+        if (eventPath != null && eventPath.startsWith('/devices/') && eventData is Map) {
+          try {
+            final parts = eventPath.split('/');
+            if (parts.length >= 3) {
+              final idx = int.tryParse(parts[2]);
+              if (idx != null) {
+                final deviceData = Map<String, dynamic>.from(eventData);
+                deviceData.remove('session_log');
+                // ابعت الجهاز الواحد في list عشان onRemoteDevices يعالجه
+                // sender_id موجود في الـ root node — نجيبه من payload
+                final rootSenderId = payload['sender_id']?.toString() ?? '';
+                final rawData = <String, dynamic>{
+                  'sender_id': rootSenderId,
+                  'single_device_index': idx,
+                  'devices': [deviceData],
+                };
+                onData(rawData, [deviceData]);
+              }
+            }
+          } catch (_) {}
+          return; // مش نكمل للـ full state processing
         }
 
         if (eventData != null && eventData is Map) {
