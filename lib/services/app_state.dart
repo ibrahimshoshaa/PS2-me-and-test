@@ -477,6 +477,7 @@ void _startClock() {
   /// يُستدعى لما يفتح شاشة السجل — بيجيب آخر 50 سجل
   Future<void> fetchHistoryOnDemand({int limit = 50}) async {
     if (shopId == null || isLoadingHistory) return;
+    if (_historyLoaded && history.isNotEmpty && limit <= 50) return; // 🔥 محمّل بالفعل (الـ refresh اليدوي بـ limit=300 بيتجاوز الـ check)
     isLoadingHistory = true;
     notifyListeners();
     try {
@@ -496,6 +497,7 @@ void _startClock() {
   /// يُستدعى لما يفتح شاشة الشيفتات
   Future<void> fetchShiftsHistoryOnDemand() async {
     if (shopId == null || isLoadingShifts) return;
+    if (_shiftsHistoryLoaded && shiftsHistory.isNotEmpty) return; // 🔥 محمّل بالفعل
     isLoadingShifts = true;
     notifyListeners();
     try {
@@ -506,6 +508,7 @@ void _startClock() {
             .map((s) => ShiftRecord.fromJson(s))
             .toList();
         _shiftsHistoryLoaded = true;
+        await SyncService.saveLocal(shopId!, _buildDataDict()); // 🔥 حفظ محلي
       }
     } catch (_) {} finally {
       isLoadingShifts = false;
@@ -516,6 +519,7 @@ void _startClock() {
   /// يُستدعى لما يفتح شاشة البطولات
   Future<void> fetchTournamentsOnDemand() async {
     if (shopId == null || isLoadingTournaments) return;
+    if (_tournamentsLoaded && tournaments.isNotEmpty) return; // 🔥 محمّل بالفعل
     isLoadingTournaments = true;
     notifyListeners();
     try {
@@ -523,6 +527,7 @@ void _startClock() {
       if (remote.isNotEmpty) {
         tournaments = remote;
         _tournamentsLoaded = true;
+        await SyncService.saveLocal(shopId!, _buildDataDict()); // 🔥 حفظ محلي
       }
     } catch (_) {} finally {
       isLoadingTournaments = false;
@@ -534,12 +539,14 @@ void _startClock() {
   /// ده للـ refresh اليدوي فقط)
   Future<void> fetchDebtsOnDemand() async {
     if (shopId == null || isLoadingDebts) return;
+    if (_debtsLoaded && debts.isNotEmpty) return; // 🔥 محمّل بالفعل
     isLoadingDebts = true;
     notifyListeners();
     try {
       final remote = await FirebaseService.fetchDebtsOnDemand(shopId!);
       debts = remote;
       _debtsLoaded = true;
+      await SyncService.saveLocal(shopId!, _buildDataDict()); // 🔥 حفظ محلي
     } catch (_) {} finally {
       isLoadingDebts = false;
       notifyListeners();
@@ -1666,6 +1673,7 @@ void _startClock() {
     }
 
     _stoppingDevices.add(d.id);
+    late Map<String, dynamic> record;
     try {
     _logEvent(d, 'stop', note: 'انتهت الجلسة');
     final timePrice = d.isActive ? d.calculateTimePrice(prices) : 0.0;
@@ -1683,7 +1691,7 @@ void _startClock() {
     final h = elapsed ~/ 3600;
     final m = (elapsed % 3600) ~/ 60;
 
-    final record = {
+    record = {
       'id': d.id,
       'name': d.displayName,
       'device_type': d.deviceType,
