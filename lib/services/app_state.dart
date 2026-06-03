@@ -2455,6 +2455,7 @@ void _startClock() {
     }
     dailyInventorySummary[item] =
         (dailyInventorySummary[item] ?? 0) + qty;
+    _pushStaticOnly(); // 🔥 FIX: ابعت التحديث لـ Firebase فوراً
   }
 
   void addInventory(String item, int qty) {
