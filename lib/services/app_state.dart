@@ -79,6 +79,7 @@ class AppState extends ChangeNotifier {
 
   // 🔥 FLAGS: هل البيانات الثقيلة اتحملت on-demand؟
   bool _historyLoaded = false;
+  int _inventoryUpdatedAt = 0; // 🔥 timestamp آخر تحديث للمخزون محلياً
   bool _shiftsHistoryLoaded = false;
   bool _tournamentsLoaded = false;
   bool _debtsLoaded = false;
@@ -692,12 +693,18 @@ void _startClock() {
     }
     if (s['inventory'] != null) {
       final remoteInv = Map<String, int>.from(s['inventory']);
-      // 🔥 FIX: بس أضف أصناف جديدة — لا تكتب فوق الكميات الموجودة محلياً
-      for (final entry in remoteInv.entries) {
-        inventory.putIfAbsent(entry.key, () => entry.value);
+      final remoteTs = (s['inventory_updated_at'] as num?)?.toInt() ?? 0;
+      // 🔥 FIX: لو الـ remote أحدث من المحلي → حدّث، لو أقدم → سيبه
+      if (remoteTs >= _inventoryUpdatedAt) {
+        inventory = remoteInv;
+        _inventoryUpdatedAt = remoteTs;
+      } else {
+        // بس أضف أصناف جديدة مش موجودة محلياً
+        for (final entry in remoteInv.entries) {
+          inventory.putIfAbsent(entry.key, () => entry.value);
+        }
+        inventory.removeWhere((k, _) => !remoteInv.containsKey(k));
       }
-      // أضف أصناف موجودة في remote بس مش في local
-      inventory.removeWhere((k, _) => !remoteInv.containsKey(k));
     }
     if (s['cashiers'] != null) {
       cashiers = List<Map<String, dynamic>>.from(
@@ -1240,6 +1247,7 @@ void _startClock() {
       'history_password_enabled': historyPasswordEnabled,
       'prices': prices,
       'inventory': inventory,
+      'inventory_updated_at': _inventoryUpdatedAt, // 🔥 timestamp للمخزون
       'daily_inventory_summary': dailyInventorySummary,
       'menu': menu,
       'buffet_categories': buffetCategories.map((c) => c.toJson()).toList(),
@@ -1283,6 +1291,7 @@ void _startClock() {
       'buffet_categories': buffetCategories.map((c) => c.toJson()).toList(),
       'menu_item_categories': _menuItemCategories,
       'inventory': inventory,
+      'inventory_updated_at': _inventoryUpdatedAt, // 🔥 timestamp للمخزون
       'daily_inventory_summary': dailyInventorySummary,
       'cashiers': cashiers,
       'cashier_password_hash': cashierPasswordHash,
@@ -2455,17 +2464,20 @@ void _startClock() {
     }
     dailyInventorySummary[item] =
         (dailyInventorySummary[item] ?? 0) + qty;
-    _pushStaticOnly(); // 🔥 FIX: ابعت التحديث لـ Firebase فوراً
+    _inventoryUpdatedAt = DateTime.now().millisecondsSinceEpoch; // 🔥 حدّث الـ timestamp
+    _pushStaticOnly();
   }
 
   void addInventory(String item, int qty) {
     inventory[item] = (inventory[item] ?? 0) + qty;
+    _inventoryUpdatedAt = DateTime.now().millisecondsSinceEpoch;
     _pushStaticOnly();
     notifyListeners();
   }
 
   void setInventoryItem(String item, int qty) {
     inventory[item] = qty;
+    _inventoryUpdatedAt = DateTime.now().millisecondsSinceEpoch;
     _pushStaticOnly();
     notifyListeners();
   }
