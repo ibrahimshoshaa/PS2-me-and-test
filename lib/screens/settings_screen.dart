@@ -1224,13 +1224,11 @@ class _MenuProductsTab extends StatelessWidget {
 				  final price = int.tryParse(priceCtrl.text);
 				  if (name.isEmpty || price == null || price <= 0) return;
 				  final buyPrice = int.tryParse(buyPriceCtrl.text) ?? 0;
-				  state.addMenuItem(name, price, buyPrice: buyPrice);
+				  // ✅ FIX: بنمرر الكاتيجوري مباشرة مع الإضافة
+				  state.addMenuItem(name, price, buyPrice: buyPrice, categoryId: selectedCatId);
 				  final qty = int.tryParse(qtyCtrl.text);
 				  if (qty != null && qty > 0) {
 				    state.addInventory(name, qty);
-				  }
-				  if (selectedCatId != null) {
-				    state.setMenuItemCategory(name, selectedCatId!);
 				  }
 				  Navigator.pop(ctx);
 				},
