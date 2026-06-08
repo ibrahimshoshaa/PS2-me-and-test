@@ -186,6 +186,7 @@ class SyncService {
     _staticSSE?.cancel();
     _staticSSE = FirebaseService.listenToStatic(
       shopId,
+      senderId: senderId, // ✅ FIX: متعملش applyStatic لو احنا اللي بعتنا
       onData: (data) {
         if (_disposed || _paused) return;
         callbacks.onRemoteStatic(data);
@@ -299,7 +300,7 @@ class SyncService {
     _pendingStatic = false;
     try {
       await FirebaseService.pushStaticData(
-          shopId, callbacks.buildStaticData());
+          shopId, callbacks.buildStaticData(), senderId); // ✅ FIX
     } catch (_) {
       _pendingStatic = true;
     }
