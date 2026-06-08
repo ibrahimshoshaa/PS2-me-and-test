@@ -173,6 +173,7 @@ class SyncService {
     _drinkTablesSSE?.cancel();
     _drinkTablesSSE = FirebaseService.listenToDrinkTables(
       shopId,
+      senderId: senderId, // ✅ FIX: متعملش merge لو احنا اللي بعتنا
       onData: (rawData, drinkTables) {
         if (_disposed || _paused) return;
         callbacks.onRemoteDrinkTables(rawData, drinkTables);
