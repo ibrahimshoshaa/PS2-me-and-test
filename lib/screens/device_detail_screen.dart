@@ -756,8 +756,7 @@ class _StartButtons extends StatelessWidget {
           width: double.infinity,
           height: 48,
           child: OutlinedButton.icon(
-            onPressed: () {
-              state.addMatchRecord(device);
+           onPressed: () => _showMatchModeDialog(context, state),
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                 content: Text(
                     '✅ تم تسجيل ماتش لـ ${device.displayName} ($matchPrice ج)'),
@@ -797,6 +796,60 @@ class _StartButtons extends StatelessWidget {
       ),
     ]);
   }
+
+  void _showMatchModeDialog(BuildContext context, AppState state) {
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF1c2128),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: const Row(children: [
+        Icon(Icons.sports_soccer, color: Color(0xFF4ade80)),
+        SizedBox(width: 8),
+        Text('نوع الماتش', style: TextStyle(color: Color(0xFF4ade80), fontWeight: FontWeight.bold)),
+      ]),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        _ModeBtn(
+          label: 'فردي (Normal)',
+          icon: Icons.person,
+          color: const Color(0xFF38bdf8),
+          onTap: () {
+            Navigator.pop(context);
+            device.mode = 'normal';
+            _recordMatch(context, state);
+          },
+        ),
+        const SizedBox(height: 10),
+        _ModeBtn(
+          label: 'مالتي (Multi)',
+          icon: Icons.people,
+          color: Colors.orange,
+          onTap: () {
+            Navigator.pop(context);
+            device.mode = 'multi';
+            _recordMatch(context, state);
+          },
+        ),
+      ]),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('إلغاء', style: TextStyle(color: Colors.white54)),
+        ),
+      ],
+    ),
+  );
+}
+
+void _recordMatch(BuildContext context, AppState state) {
+  final matchPrice = state.matchPriceFor(device);
+  state.addMatchRecord(device);
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text('✅ تم تسجيل ماتش (${device.mode == 'multi' ? 'مالتي' : 'فردي'}) — $matchPrice ج'),
+    backgroundColor: Colors.green,
+    duration: const Duration(seconds: 2),
+  ));
+}
 
   void _showStartModeDialog(BuildContext context, AppState state) {
     showDialog(
@@ -1606,6 +1659,36 @@ class _StepDot extends StatelessWidget {
     );
   }
 }
+
+class _ModeBtn extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+  const _ModeBtn({required this.label, required this.icon, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.5)),
+        ),
+        child: Row(children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(width: 12),
+          Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 15)),
+        ]),
+      ),
+    );
+  }
+}
+
 
 class _ModeChip extends StatelessWidget {
   final IconData icon;
