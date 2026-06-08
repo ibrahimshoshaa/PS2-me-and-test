@@ -756,14 +756,7 @@ class _StartButtons extends StatelessWidget {
           width: double.infinity,
           height: 48,
           child: OutlinedButton.icon(
-           onPressed: () => _showMatchModeDialog(context, state),
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text(
-                    '✅ تم تسجيل ماتش لـ ${device.displayName} ($matchPrice ج)'),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 2),
-              ));
-            },
+            onPressed: () => _showMatchModeDialog(context, state),
             icon: const Icon(Icons.sports_soccer,
                 color: Color(0xFF4ade80)),
             label: Text('+ ماتش  ($matchPrice ج)',
@@ -797,7 +790,7 @@ class _StartButtons extends StatelessWidget {
     ]);
   }
 
-  void _showMatchModeDialog(BuildContext context, AppState state) {
+    void _showMatchModeDialog(BuildContext context, AppState state) {
   showDialog(
     context: context,
     builder: (_) => AlertDialog(
@@ -809,7 +802,7 @@ class _StartButtons extends StatelessWidget {
         Text('نوع الماتش', style: TextStyle(color: Color(0xFF4ade80), fontWeight: FontWeight.bold)),
       ]),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
-        _ModeBtn(
+        _MatchModeBtn(
           label: 'فردي (Normal)',
           icon: Icons.person,
           color: const Color(0xFF38bdf8),
@@ -820,7 +813,7 @@ class _StartButtons extends StatelessWidget {
           },
         ),
         const SizedBox(height: 10),
-        _ModeBtn(
+        _MatchModeBtn(
           label: 'مالتي (Multi)',
           icon: Icons.people,
           color: Colors.orange,
@@ -841,7 +834,7 @@ class _StartButtons extends StatelessWidget {
   );
 }
 
-void _recordMatch(BuildContext context, AppState state) {
+  void _recordMatch(BuildContext context, AppState state) {
   final matchPrice = state.matchPriceFor(device);
   state.addMatchRecord(device);
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1660,12 +1653,12 @@ class _StepDot extends StatelessWidget {
   }
 }
 
-class _ModeBtn extends StatelessWidget {
+class _MatchModeBtn extends StatelessWidget {
   final String label;
   final IconData icon;
   final Color color;
   final VoidCallback onTap;
-  const _ModeBtn({required this.label, required this.icon, required this.color, required this.onTap});
+  const _MatchModeBtn({required this.label, required this.icon, required this.color, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
