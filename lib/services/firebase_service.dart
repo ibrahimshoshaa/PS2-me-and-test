@@ -30,20 +30,61 @@ import 'package:http/http.dart' as http;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class FirebaseService {
-  static const String _baseUrl =
-      'https://psmanagementapp-default-rtdb.firebaseio.com';
-  // ⚠️ TODO: انقل الـ secret ده لـ --dart-define أو Firebase Environment Config
-  // flutter run --dart-define=FB_SECRET=your_secret
-  static const String _secret = String.fromEnvironment(
-    'FB_SECRET',
-    defaultValue: 'uy6vaerRBXq497rXIltP2F5NJCn75dyev9DeHeSF',
-  );
+  // ══════════════════════════════════════════════════════════════════════════
+  // MULTI-PROJECT CONFIG
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // كل اكونت Firebase عنده prefix خاص بيه في الـ shopId
+  // مثلاً: ps1_ABC → مشروع 1 | ps2_XYZ → مشروع 2
+  // لو مفيش prefix معروف → بيروح للـ default
+  //
+  // عشان تضيف مشروع جديد: زود entry في _projects بالـ prefix والـ url والـ secret
+  // ──────────────────────────────────────────────────────────────────────────
 
-  static String _url(String path) => '$_baseUrl/$path.json?auth=$_secret';
+  static const _projects = <String, Map<String, String>>{
+    // prefix  →  { 'url': ..., 'secret': ... }
+    'ps1_': {
+      'url':    'https://ps-harifa-default-rtdb.firebaseio.com',
+      'secret': 'loFnECpWdlhEHnzGdPW1VoWKbZPepbgrqDVjTnEY',
+    },
+    'ps2_': {
+      'url':    'https://psmanagementapp-default-rtdb.firebaseio.com',
+      'secret': 'uy6vaerRBXq497rXIltP2F5NJCn75dyev9DeHeSF',
+    },
+    // 'ps3_': {
+    //   'url':    'https://YOUR-THIRD-rtdb.firebaseio.com',
+    //   'secret': 'YOUR_SECRET_HERE',
+    // },
+  };
+
+  // الـ default لو الـ shopId مش عنده prefix معروف
+  static const _defaultUrl    = 'https://ps-harifa-default-rtdb.firebaseio.com';
+  static const _defaultSecret = 'loFnECpWdlhEHnzGdPW1VoWKbZPepbgrqDVjTnEY';
+
+  /// بيرجع الـ { url, secret } المناسب للـ shopId ده
+  static Map<String, String> _configFor(String? shopId) {
+    if (shopId != null && shopId.isNotEmpty) {
+      final lower = shopId.toLowerCase();
+      for (final entry in _projects.entries) {
+        if (lower.startsWith(entry.key.toLowerCase())) return entry.value;
+      }
+    }
+    return {'url': _defaultUrl, 'secret': _defaultSecret};
+  }
+
+  /// الـ shopId الحالي — بيتضبط من AppState عند activateShop() و loadData()
+  static String? _currentShopId;
+  static void setShopId(String? id) => _currentShopId = id;
+
+  static String _url(String path) {
+    final cfg = _configFor(_currentShopId);
+    return '${cfg["url"]}/$path.json?auth=${cfg["secret"]}';
+  }
 
   /// مثل `_url` لكن بيقبل query params إضافية (مثلاً limitToLast)
   static String _urlWithQuery(String path, Map<String, String> params) {
-    final base = '$_baseUrl/$path.json?auth=$_secret';
+    final cfg = _configFor(_currentShopId);
+    final base = '${cfg["url"]}/$path.json?auth=${cfg["secret"]}';
     if (params.isEmpty) return base;
     final extra = params.entries
         .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
@@ -1149,7 +1190,7 @@ class FirebaseService {
           .timeout(const Duration(seconds: 10));
 
       final timeFuture = http
-          .get(Uri.parse('$_baseUrl/.json?shallow=true&auth=$_secret'))
+          .get(Uri.parse(() { final c = _configFor(_currentShopId); return '${c["url"]}/.json?shallow=true&auth=${c["secret"]}'; }()))
           .timeout(const Duration(seconds: 10));
 
       final results = await Future.wait([subFuture, timeFuture]);
