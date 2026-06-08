@@ -2447,16 +2447,18 @@ void _startClock() {
   // MENU & INVENTORY
   // ══════════════════════════════════════════════════════════════════════════
 
-  Future<void> addMenuItem(String name, int price, {int buyPrice = 0}) async {
+  Future<void> addMenuItem(String name, int price, {int buyPrice = 0, String? categoryId}) async {
     menu[name] = price;
     if (buyPrice > 0) menuBuyPrices[name] = buyPrice;
-    if (!_menuItemCategories.containsKey(name)) {
-      _menuItemCategories[name] = buffetCategories.isNotEmpty
-          ? buffetCategories.last.id
-          : 'other';
-    }
     if (buffetCategories.isEmpty) {
       buffetCategories = BuffetCategory.defaults;
+    }
+    // ✅ FIX: نحط الكاتيجوري اللي اختارها المستخدم مباشرة
+    // لو مفيش اختيار → 'other' بس مش آخر كاتيجوري تلقائياً
+    if (categoryId != null) {
+      _menuItemCategories[name] = categoryId;
+    } else if (!_menuItemCategories.containsKey(name)) {
+      _menuItemCategories[name] = 'other';
     }
     AuditLogService.log(
         action: AuditAction.menuItemAdded,
