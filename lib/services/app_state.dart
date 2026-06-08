@@ -284,6 +284,8 @@ void _startClock() {
         },
         onRemoteStatic: (data) {
           // 🔥 BANDWIDTH FIX #4: static يصل عبر SSE — لا poll دوري
+          // ✅ FIX: لو احنا اللي بعتنا التغيير — متعملش applyStatic تاني
+          if (data['_sender_id'] == _myDeviceId) return;
           _markSseAlive();
           _applyStaticData(data);
           notifyListeners();
@@ -1322,7 +1324,7 @@ void _startClock() {
   Future<void> saveData() async {
     if (shopId == null) return;
     await SyncService.saveLocal(shopId!, _buildDataDict());
-    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+    await FirebaseService.pushStaticData(shopId!, _buildStaticData(), _myDeviceId);
   }
 
   Future<void> _saveDevices({int? deviceId}) async {
@@ -1381,7 +1383,7 @@ void _startClock() {
 
   Future<void> _pushStaticOnly() async {
     if (shopId == null) return;
-    await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+    await FirebaseService.pushStaticData(shopId!, _buildStaticData(), _myDeviceId);
     await SyncService.saveLocal(shopId!, _buildDataDict());
   }
 
@@ -2467,7 +2469,7 @@ void _startClock() {
         extra: {'item': name, 'price': price});
     notifyListeners();
     if (shopId != null) {
-      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData(), _myDeviceId);
     }
     await SyncService.saveLocal(shopId!, _buildDataDict());
   }
@@ -2483,7 +2485,7 @@ void _startClock() {
         actionDetails: 'حذف منتج "$name" من البوفيه');
     notifyListeners();
     if (shopId != null) {
-      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData(), _myDeviceId);
     }
     await SyncService.saveLocal(shopId!, _buildDataDict());
   }
@@ -2499,7 +2501,7 @@ void _startClock() {
     }
     notifyListeners();
     if (shopId != null) {
-      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData(), _myDeviceId);
     }
     await SyncService.saveLocal(shopId!, _buildDataDict());
   }
@@ -3212,7 +3214,7 @@ void _startClock() {
     rechargeTransactions.clear();
     notifyListeners();
     if (shopId != null) {
-      await FirebaseService.pushStaticData(shopId!, _buildStaticData());
+      await FirebaseService.pushStaticData(shopId!, _buildStaticData(), _myDeviceId);
       await SyncService.saveLocal(shopId!, _buildDataDict());
     }
   }
