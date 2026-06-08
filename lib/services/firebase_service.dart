@@ -33,16 +33,13 @@ class FirebaseService {
   // ══════════════════════════════════════════════════════════════════════════
   // MULTI-PROJECT CONFIG
   // ══════════════════════════════════════════════════════════════════════════
-  //
   // كل اكونت Firebase عنده prefix خاص بيه في الـ shopId
   // مثلاً: ps1_ABC → مشروع 1 | ps2_XYZ → مشروع 2
   // لو مفيش prefix معروف → بيروح للـ default
-  //
   // عشان تضيف مشروع جديد: زود entry في _projects بالـ prefix والـ url والـ secret
   // ──────────────────────────────────────────────────────────────────────────
 
   static const _projects = <String, Map<String, String>>{
-    // prefix  →  { 'url': ..., 'secret': ... }
     'ps1_': {
       'url':    'https://ps-harifa-default-rtdb.firebaseio.com',
       'secret': 'loFnECpWdlhEHnzGdPW1VoWKbZPepbgrqDVjTnEY',
@@ -57,11 +54,9 @@ class FirebaseService {
     // },
   };
 
-  // الـ default لو الـ shopId مش عنده prefix معروف
   static const _defaultUrl    = 'https://ps-harifa-default-rtdb.firebaseio.com';
   static const _defaultSecret = 'loFnECpWdlhEHnzGdPW1VoWKbZPepbgrqDVjTnEY';
 
-  /// بيرجع الـ { url, secret } المناسب للـ shopId ده
   static Map<String, String> _configFor(String? shopId) {
     if (shopId != null && shopId.isNotEmpty) {
       final lower = shopId.toLowerCase();
@@ -334,8 +329,11 @@ class FirebaseService {
   }
 
   static Future<bool> pushStaticData(
-      String shopId, Map<String, dynamic> staticData) async {
-    return set(staticDataPath(shopId), staticData);
+      String shopId, Map<String, dynamic> staticData,
+      [String? senderId]) async {
+    final data = Map<String, dynamic>.from(staticData);
+    if (senderId != null) data['_sender_id'] = senderId;
+    return set(staticDataPath(shopId), data);
   }
 
   static Future<bool> appendSingleHistoryRecord(
@@ -981,6 +979,7 @@ class FirebaseService {
   // مش محتاجين نعمل poll على static كل 60 ثانية بعد كده.
   static StreamSubscription<dynamic> listenToStatic(
     String shopId, {
+    String? senderId,
     required void Function(Map<String, dynamic> data) onData,
     void Function(Object error)? onError,
     Duration retryDelay = const Duration(seconds: 2),
@@ -989,10 +988,14 @@ class FirebaseService {
       staticDataPath(shopId),
       onData: (payload) {
         if (payload == null || payload is! Map) return;
-        final data = payload['data'];
-        if (data == null || data is! Map) return;
+        final raw = payload['data'];
+        if (raw == null || raw is! Map) return;
         try {
-          onData(Map<String, dynamic>.from(data));
+          final data = Map<String, dynamic>.from(raw);
+          // ✅ FIX: لو احنا اللي بعتنا التغيير — متعملش applyStatic تاني
+          if (senderId != null && data['_sender_id'] == senderId) return;
+          data.remove('_sender_id');
+          onData(data);
         } catch (_) {}
       },
       onError: onError,
