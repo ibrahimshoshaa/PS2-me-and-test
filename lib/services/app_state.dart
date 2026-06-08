@@ -1369,7 +1369,12 @@ void _startClock() {
           shopId!, drinkTables, _myDeviceId));
     }
     if (futures.isNotEmpty) await Future.wait(futures);
-    _sync?.schedulePushTables();
+    // ✅ FIX: schedulePushTables بس لو tables العادية تغيرت
+    // لو drinkTables تغيرت — احنا بعتنا فوراً فوق، مش محتاجين debounce تاني
+    // الـ debounce كان بيبعت نسخة قديمة من drinkTables وبيـoverwrite التغييرات
+    if (tablesChanged && !drinkTablesChanged) {
+      _sync?.schedulePushTables();
+    }
     _pushSummary(); // 🔥 حدّث summary عند أي تغيير في التربيزات
   }
 
