@@ -1833,13 +1833,14 @@ void _startClock() {
 
   String? addOrder(PSDevice d, String item, int qty) {
     if (qty > 0) {
-      final available = inventory[item];
-      if (available != null && available <= 0) {
+      // ✅ FIX: أي صنف كميته صفر أو مش محدودة في inventory ممنوع تماماً
+      final available = inventory[item] ?? 0;
+      if (available <= 0) {
         return 'نفد "$item" من المخزن!';
       }
       final currentInOrder = d.orders[item] ?? 0;
       final totalNeeded = currentInOrder + qty;
-      if (available != null && totalNeeded > available) {
+      if (totalNeeded > available) {
         return 'الكمية المتاحة من "$item" هي $available فقط!';
       }
     }
@@ -2206,14 +2207,15 @@ void _startClock() {
 
   String? addTableOrder(int index, String item, int qty) {
     if (qty > 0) {
-      final available = inventory[item];
-      if (available != null && available <= 0) {
+      // ✅ FIX: أي صنف كميته صفر أو مش محدودة في inventory ممنوع تماماً
+      final available = inventory[item] ?? 0;
+      if (available <= 0) {
         return 'نفد "$item" من المخزن!';
       }
       final orders = Map<String, int>.from(tables[index]['orders'] ?? {});
       final currentInOrder = orders[item] ?? 0;
       final totalNeeded = currentInOrder + qty;
-      if (available != null && totalNeeded > available) {
+      if (totalNeeded > available) {
         return 'الكمية المتاحة هي $available فقط!';
       }
     }
@@ -2270,15 +2272,16 @@ void _startClock() {
 
   String? addDrinkTableOrder(int index, String item, int qty) {
     if (qty > 0) {
-      final available = inventory[item];
-      if (available != null && available <= 0) {
+      // ✅ FIX: أي صنف كميته صفر أو مش محدودة في inventory ممنوع تماماً
+      final available = inventory[item] ?? 0;
+      if (available <= 0) {
         return 'نفد "$item" من المخزن!';
       }
       final orders =
           Map<String, int>.from(drinkTables[index]['orders'] ?? {});
       final currentInOrder = orders[item] ?? 0;
       final totalNeeded = currentInOrder + qty;
-      if (available != null && totalNeeded > available) {
+      if (totalNeeded > available) {
         return 'الكمية المتاحة هي $available فقط!';
       }
     }
@@ -2454,6 +2457,11 @@ void _startClock() {
   Future<void> addMenuItem(String name, int price, {int buyPrice = 0, String? categoryId}) async {
     menu[name] = price;
     if (buyPrice > 0) menuBuyPrices[name] = buyPrice;
+    // ✅ FIX: أي صنف جديد بيتضاف تلقائياً للمخزون بكمية صفر
+    // عشان الفحص في addOrder/addTableOrder/addDrinkTableOrder يشتغل صح
+    if (!inventory.containsKey(name)) {
+      inventory[name] = 0;
+    }
     if (buffetCategories.isEmpty) {
       buffetCategories = BuffetCategory.defaults;
     }
