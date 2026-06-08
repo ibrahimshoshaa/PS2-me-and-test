@@ -820,6 +820,7 @@ class FirebaseService {
 
   static StreamSubscription<dynamic> listenToDrinkTables(
     String shopId, {
+    String? senderId, // ✅ FIX: زي listenToTables و listenToStatic
     required void Function(
         Map<String, dynamic> rawData,
         List<Map<String, dynamic>> drinkTables) onData,
@@ -832,6 +833,9 @@ class FirebaseService {
         if (payload == null || payload is! Map) return;
         final eventData = payload['data'];
         if (eventData == null || eventData is! Map) return;
+        // ✅ FIX: لو احنا اللي بعتنا التغيير — متعملش merge تاني
+        // ده بيمنع overwrite الطلبات لما تضيف أوردر على تربيزة 1 وبعدين 2
+        if (senderId != null && eventData['sender_id'] == senderId) return;
         final drinkTables = eventData['drink_tables'];
         if (drinkTables == null) return;
         if (drinkTables is List) {
@@ -1228,9 +1232,23 @@ class FirebaseService {
   }
 
   static Future<Map<String, dynamic>?> getSubscription(String shopId) async {
-    final data = await get(shopSubscriptionPath(shopId));
-    if (data == null || data is! Map) return null;
-    return Map<String, dynamic>.from(data);
+    // ✅ FIX: بنمرر shopId مباشرة لـ _configFor عشان نختار المشروع الصح
+    // قبل كده كانت بتعتمد على _currentShopId اللي بيكون null وقت التحقق
+    // فكانت دايماً بتروح على المشروع الـ default (PS1) حتى لو الكود PS2
+    final cfg = _configFor(shopId);
+    final path = shopSubscriptionPath(shopId);
+    final url = '${cfg["url"]}/$path.json?auth=${cfg["secret"]}';
+    try {
+      final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body);
+        if (data == null || data is! Map) return null;
+        return Map<String, dynamic>.from(data);
+      }
+    } catch (e) {
+      print('Firebase getSubscription error: $e');
+    }
+    return null;
   }
 
   static Future<Map<String, dynamic>> getAllOpenShifts(String shopId) async {
