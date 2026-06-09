@@ -318,6 +318,22 @@ class FirebaseService {
     });
   }
 
+  // 🔥 RACE CONDITION FIX: بيبعت تربيزة مشروبات واحدة بـ PATCH بدل كل الـ state
+  // بيحل الـ race condition لأن كل تربيزة بتتحدث independently
+  // لما تضيف أوردر على تربيزة 1 وبعدين تربيزة 2 بسرعة — مش بيـoverwrite بعض
+  static Future<bool> pushSingleDrinkTable(
+      String shopId,
+      int index,
+      Map<String, dynamic> drinkTableData,
+      String senderId) async {
+    final updateData = {
+      'drink_tables/$index': drinkTableData,
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+      'sender_id': senderId,
+    };
+    return patch(drinkTablesStatePath(shopId), updateData);
+  }
+
   static Future<bool> pushTables(
       String shopId, List<Map<String, dynamic>> tables) async {
     return set(tablesPath(shopId), tables);
@@ -831,7 +847,35 @@ class FirebaseService {
       drinkTablesStatePath(shopId),
       onData: (payload) {
         if (payload == null || payload is! Map) return;
+
+        final eventPath = payload['path'] as String?;
         final eventData = payload['data'];
+
+        // 🔥 RACE CONDITION FIX: handle partial patch من pushSingleDrinkTable
+        // Firebase بيبعت path = '/drink_tables/2' مش '/'
+        if (eventPath != null &&
+            eventPath.startsWith('/drink_tables/') &&
+            eventData is Map) {
+          try {
+            final parts = eventPath.split('/');
+            if (parts.length >= 3) {
+              final idx = int.tryParse(parts[2]);
+              if (idx != null) {
+                // لو احنا اللي بعتنا — تجاهل
+                final patchSenderId = payload['sender_id']?.toString() ?? '';
+                if (senderId != null && patchSenderId == senderId) return;
+                final tableData = Map<String, dynamic>.from(eventData);
+                final rawData = <String, dynamic>{
+                  'sender_id': patchSenderId,
+                  'single_drink_table_index': idx,
+                };
+                onData(rawData, [tableData]);
+              }
+            }
+          } catch (_) {}
+          return; // مش نكمل للـ full state processing
+        }
+
         if (eventData == null || eventData is! Map) return;
         // ✅ FIX: لو احنا اللي بعتنا التغيير — متعملش merge تاني
         // ده بيمنع overwrite الطلبات لما تضيف أوردر على تربيزة 1 وبعدين 2
