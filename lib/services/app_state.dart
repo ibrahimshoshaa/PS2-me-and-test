@@ -279,7 +279,13 @@ void _startClock() {
         onRemoteDrinkTables: (rawData, remoteDrinkTables) {
           if (rawData['sender_id'] == _myDeviceId) return;
           _markSseAlive();
-          _mergeRemoteDrinkTables(remoteDrinkTables);
+          // 🔥 RACE CONDITION FIX: لو SSE جاب partial patch (تربيزة واحدة)
+          final singleIdx = rawData['single_drink_table_index'] as int?;
+          if (singleIdx != null && remoteDrinkTables.length == 1) {
+            _mergeSingleRemoteDrinkTable(singleIdx, remoteDrinkTables.first);
+          } else {
+            _mergeRemoteDrinkTables(remoteDrinkTables);
+          }
           notifyListeners();
         },
         onRemoteStatic: (data) {
@@ -657,10 +663,33 @@ void _startClock() {
       drinkTables.add(remoteDrinkTables[drinkTables.length]);
     }
     for (int i = 0; i < remoteDrinkTables.length; i++) {
-      drinkTables[i] = remoteDrinkTables[i];
+      final remote = remoteDrinkTables[i];
+      final local = drinkTables[i];
+      final localOrders = Map<String, int>.from(local['orders'] ?? {});
+      final remoteOrders = Map<String, int>.from(remote['orders'] ?? {});
+      // 🔥 RACE CONDITION FIX: لو المحلي فيه طلبات والريموت فاضي
+      // ده يعني غالباً race condition — خد الريموت في باقي الحقول بس
+      if (localOrders.isNotEmpty && remoteOrders.isEmpty) {
+        drinkTables[i] = {...remote, 'orders': localOrders};
+      } else {
+        drinkTables[i] = remote;
+      }
     }
     if (remoteDrinkTables.length < drinkTables.length) {
       drinkTables.removeRange(remoteDrinkTables.length, drinkTables.length);
+    }
+  }
+
+  // 🔥 RACE CONDITION FIX: يُستدعى من onRemoteDrinkTables لما SSE يبعت
+  // single_drink_table_index (partial patch من pushSingleDrinkTable)
+  void _mergeSingleRemoteDrinkTable(int index, Map<String, dynamic> remoteTable) {
+    if (index < 0 || index >= drinkTables.length) return;
+    final localOrders = Map<String, int>.from(drinkTables[index]['orders'] ?? {});
+    final remoteOrders = Map<String, int>.from(remoteTable['orders'] ?? {});
+    if (localOrders.isNotEmpty && remoteOrders.isEmpty) {
+      drinkTables[index] = {...remoteTable, 'orders': localOrders};
+    } else {
+      drinkTables[index] = remoteTable;
     }
   }
 
@@ -1376,6 +1405,16 @@ void _startClock() {
       _sync?.schedulePushTables();
     }
     _pushSummary(); // 🔥 حدّث summary عند أي تغيير في التربيزات
+  }
+
+  // 🔥 RACE CONDITION FIX: بيبعت تربيزة مشروبات واحدة بـ PATCH بدل كل الـ state
+  // يُستخدم في addDrinkTableOrder و setDrinkTableOrders بدل _saveTables
+  Future<void> _saveSingleDrinkTable(int index) async {
+    if (shopId == null) return;
+    await SyncService.saveLocal(shopId!, _buildDataDict());
+    await FirebaseService.pushSingleDrinkTable(
+        shopId!, index, drinkTables[index], _myDeviceId);
+    _pushSummary();
   }
 
   Future<void> _saveHistory() async {
@@ -2308,14 +2347,14 @@ void _startClock() {
       extra: {'table_name': dtName, 'item': item, 'qty': qty},
     );
 
-    _saveTables(tablesChanged: false, drinkTablesChanged: true);
+    _saveSingleDrinkTable(index); // 🔥 RACE FIX: patch تربيزة واحدة بس
     notifyListeners();
     return null;
   }
 
   void setDrinkTableOrders(int index, Map<String, int> orders) {
     drinkTables[index]['orders'] = orders;
-    _saveTables(tablesChanged: false, drinkTablesChanged: true);
+    _saveSingleDrinkTable(index); // 🔥 RACE FIX: patch تربيزة واحدة بس
     notifyListeners();
   }
 
