@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/app_state.dart';
@@ -2412,58 +2414,177 @@ class _Dialog extends StatelessWidget {
   }
 }
 
-class _SubscriptionBanner extends StatelessWidget {
+class _SubscriptionBanner extends StatefulWidget {
   final AppState state;
   const _SubscriptionBanner({required this.state});
 
   @override
+  State<_SubscriptionBanner> createState() => _SubscriptionBannerState();
+}
+
+class _SubscriptionBannerState extends State<_SubscriptionBanner> {
+  late Timer _timer;
+  late Duration _remaining;
+
+  @override
+  void initState() {
+    super.initState();
+    _remaining = _calcRemaining();
+    // بيتحدث كل ثانية
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _remaining = _calcRemaining());
+    });
+  }
+
+  Duration _calcRemaining() {
+    final expiry = widget.state.subscriptionExpiry;
+    if (expiry == null) return Duration.zero;
+    final diff = expiry.difference(DateTime.now());
+    return diff.isNegative ? Duration.zero : diff;
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final expiry = state.subscriptionExpiry!;
-    final daysLeft = expiry.difference(DateTime.now()).inDays;
-    final isExpired = DateTime.now().isAfter(expiry);
+    final expiry = widget.state.subscriptionExpiry!;
+    final isExpired = _remaining == Duration.zero;
+
+    final days = _remaining.inDays;
+    final hours = _remaining.inHours % 24;
+    final minutes = _remaining.inMinutes % 60;
+    final seconds = _remaining.inSeconds % 60;
 
     final color = isExpired
         ? Colors.red
-        : daysLeft <= 7
+        : days <= 7
             ? Colors.orange
             : const Color(0xFF4ade80);
 
     final icon = isExpired
         ? Icons.cancel_outlined
-        : daysLeft <= 7
+        : days <= 7
             ? Icons.warning_amber_rounded
             : Icons.check_circle_outline;
 
-    final label = isExpired
-        ? 'منتهي'
-        : daysLeft == 0
-            ? 'آخر يوم!'
-            : '$daysLeft يوم متبقي';
-
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: const Color(0xFF1c2128),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: color.withOpacity(0.4)),
       ),
-      child: Row(children: [
-        Icon(Icons.workspace_premium, color: color, size: 18),
-        const SizedBox(width: 10),
-        const Text('الاشتراك',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-        const Spacer(),
-        Icon(icon, color: color, size: 15),
-        const SizedBox(width: 4),
-        Text(label,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ─── Header ────────────────────────────────────────────────
+          Row(children: [
+            Icon(Icons.workspace_premium, color: color, size: 18),
+            const SizedBox(width: 8),
+            const Text('الاشتراك',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            const Spacer(),
+            Icon(icon, color: color, size: 16),
+            const SizedBox(width: 4),
+            Text(
+              isExpired ? 'منتهي' : 'نشط',
+              style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13),
+            ),
+          ]),
+
+          const SizedBox(height: 12),
+
+          // ─── العداد التنازلي ────────────────────────────────────────
+          if (!isExpired)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _CountdownUnit(value: days, label: 'يوم', color: color),
+                _CountdownDivider(color: color),
+                _CountdownUnit(value: hours, label: 'ساعة', color: color),
+                _CountdownDivider(color: color),
+                _CountdownUnit(value: minutes, label: 'دقيقة', color: color),
+                _CountdownDivider(color: color),
+                _CountdownUnit(value: seconds, label: 'ثانية', color: color),
+              ],
+            )
+          else
+            Center(
+              child: Text(
+                '⚠️ انتهى الاشتراك، تواصل مع المطور للتجديد',
+                style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+
+          const SizedBox(height: 10),
+
+          // ─── تاريخ الانتهاء ─────────────────────────────────────────
+          Center(
+            child: Text(
+              'ينتهي في ${expiry.day}/${expiry.month}/${expiry.year}',
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CountdownUnit extends StatelessWidget {
+  final int value;
+  final String label;
+  final Color color;
+  const _CountdownUnit({required this.value, required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          width: 52,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withOpacity(0.3)),
+          ),
+          child: Text(
+            value.toString().padLeft(2, '0'),
+            textAlign: TextAlign.center,
             style: TextStyle(
-                color: color, fontWeight: FontWeight.bold, fontSize: 13)),
-        const SizedBox(width: 8),
-        Text(
-          '${expiry.day}/${expiry.month}/${expiry.year}',
-          style: const TextStyle(color: Colors.white38, fontSize: 12),
+              color: color,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
         ),
-      ]),
+        const SizedBox(height: 4),
+        Text(label, style: const TextStyle(color: Colors.white38, fontSize: 10)),
+      ],
+    );
+  }
+}
+
+class _CountdownDivider extends StatelessWidget {
+  final Color color;
+  const _CountdownDivider({required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Text(':', style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.bold)),
     );
   }
 }
