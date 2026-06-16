@@ -860,25 +860,34 @@ void _startClock() {
     final cachedExpiry = prefs.getString('sub_expires_$savedId');
     if (cachedExpiry != null) {
       final expiry = DateTime.tryParse(cachedExpiry);
-      if (expiry != null && DateTime.now().isBefore(expiry)) {
-        isActivated = true;
-        subscriptionActive = true;
+      if (expiry != null) {
         subscriptionExpiry = expiry;
-        notifyListeners();
-        _startSync();
-        await _restoreOpenShiftFromFirebase();
-        await _restoreLoginState();
-        notifyListeners();
-        _checkSubscriptionOnline();
-        return;
+
+        if (DateTime.now().isBefore(expiry)) {
+          // ✅ الاشتراك لسه شغال — يشتغل حتى لو مفيش نت
+          isActivated = true;
+          subscriptionActive = true;
+          notifyListeners();
+          _startSync();
+          await _restoreOpenShiftFromFirebase();
+          await _restoreLoginState();
+          notifyListeners();
+          _checkSubscriptionOnline(); // في الخلفية بس — مش blocking
+          return;
+        } else {
+          // ❌ الاشتراك خلص — صفحة الكود مباشرة بدون ما نحتاج نت
+          isActivated = false;
+          subscriptionActive = false;
+          notifyListeners();
+          return;
+        }
       }
     }
 
+    // مفيش كاش خالص = أول مرة = لازم نت + كود
     isActivated = false;
     subscriptionActive = false;
     notifyListeners();
-    await _restoreOpenShiftFromFirebase();
-    await _checkSubscriptionOnline();
   }
 
   Future<void> _restoreOpenShiftFromFirebase() async {
