@@ -869,7 +869,7 @@ void _startClock() {
           subscriptionActive = true;
           notifyListeners();
           _startSync();
-          await _restoreOpenShiftFromFirebase();
+          _restoreOpenShiftFromFirebase();
           await _restoreLoginState();
           notifyListeners();
           _checkSubscriptionOnline(); // في الخلفية بس — مش blocking
