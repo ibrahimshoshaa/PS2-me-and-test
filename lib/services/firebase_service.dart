@@ -349,7 +349,10 @@ class FirebaseService {
       [String? senderId]) async {
     final data = Map<String, dynamic>.from(staticData);
     if (senderId != null) data['_sender_id'] = senderId;
-    return set(staticDataPath(shopId), data);
+    // 🔥 FIX: PATCH مش SET — عشان منمسحش حقول بيكتبها تطبيق تاني (بايثون)
+    // مش موجودة في الـ payload بتاع الفلاتر (زي expenses, expense_categories).
+    // SET كانت بتستبدل عقدة static/ بالكامل وتمسح أي حقل مش معروف للفلاتر.
+    return patch(staticDataPath(shopId), data);
   }
 
   static Future<bool> appendSingleHistoryRecord(
